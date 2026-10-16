@@ -60,7 +60,7 @@ def page(site):
         page = browser.new_page(viewport={"width": 1440, "height": 1000}, accept_downloads=True)
         page.set_default_timeout(TIMEOUT_MS)
         page.goto(site)
-        page.get_by_role("heading", name="1. Проект").wait_for()
+        page.get_by_role("heading", name="Проект", exact=True).wait_for()
         yield page
         browser.close()
 
@@ -70,19 +70,26 @@ def assert_no_errors(page) -> None:
     assert exceptions.count() == 0, exceptions.first.inner_text()
 
 
-def download_package(page) -> zipfile.ZipFile:
-    with page.expect_download() as download:
-        page.get_by_role("button", name=re.compile("Скачать пакет")).click()
-    return zipfile.ZipFile(io.BytesIO(Path(download.value.path()).read_bytes()))
+def download_package(page, root: str) -> list[str]:
+    """Скачивает пакет; пока Streamlit пересчитывает страницу, кнопка может отдавать прошлый проект — ждём нужный."""
+    deadline = time.monotonic() + TIMEOUT_MS / 1000
+    while True:
+        with page.expect_download() as download:
+            page.get_by_role("button", name=re.compile("Скачать пакет")).click()
+        names = zipfile.ZipFile(io.BytesIO(Path(download.value.path()).read_bytes())).namelist()
+        if names[0].startswith(f"{root}-repro/") or time.monotonic() > deadline:
+            assert names[0].startswith(f"{root}-repro/"), names[:3]
+            return names
+        time.sleep(1)
 
 
 def test_demo_project_is_analyzed_and_package_downloads(page):
     page.get_by_text("Демо-проект", exact=True).first.click()
     page.get_by_test_id("stSelectbox").first.click()  # первый список — выбор демо-проекта
     page.get_by_role("option", name=re.compile("messy_lab_project")).click()
-    page.get_by_role("heading", name="5. Пакет воспроизводимости").wait_for()
+    page.get_by_role("button", name=re.compile("Скачать пакет")).wait_for()
     assert_no_errors(page)
-    names = download_package(page).namelist()
+    names = download_package(page, "messy-lab-project")
     assert any(n.endswith("/verify.sh") for n in names) and any(n.endswith("/verify.ps1") for n in names)
     assert not any(n.endswith("/project/.env") for n in names)
 
@@ -93,7 +100,7 @@ def test_uploaded_zip_is_analyzed_in_browser(page, tmp_path: Path):
         for file in (ROOT / "examples" / "local_module_project").rglob("*.py"):
             zf.write(file, file.relative_to(ROOT / "examples").as_posix())
     page.locator("input[type=file]").set_input_files(str(archive))
-    page.get_by_role("heading", name="5. Пакет воспроизводимости").wait_for()
+    page.get_by_role("button", name=re.compile("Скачать пакет")).wait_for()
     assert_no_errors(page)
-    names = download_package(page).namelist()
+    names = download_package(page, "local-module-project")
     assert any(n.endswith("/project/main.py") for n in names) and any(n.endswith("/README.md") for n in names)
