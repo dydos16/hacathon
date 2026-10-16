@@ -1,5 +1,5 @@
 {
-  "_comment": "known: имя импорта -> пакет PyPI; ambiguous: несколько правдоподобных пакетов, нужен выбор пользователя",
+  "_comment": "known: имя импорта -> пакет PyPI (ключ может быть с точкой: google.protobuf); ambiguous: несколько правдоподобных пакетов, нужен выбор пользователя; alternatives: другие пакеты с тем же модулем — берутся, если автор объявил их; not_on_pypi: модуль не ставится из PyPI под этим именем -> пояснение; conda_to_pypi: имя пакета conda -> имя на PyPI. Все имена пакетов проверены на pypi.org",
   "known": {
     "numpy": "numpy", "pandas": "pandas", "scipy": "scipy", "matplotlib": "matplotlib",
     "seaborn": "seaborn", "plotly": "plotly", "statsmodels": "statsmodels", "sympy": "sympy",
@@ -31,15 +31,67 @@
     "pymc": "pymc", "arviz": "arviz", "emcee": "emcee", "lmfit": "lmfit",
     "uncertainties": "uncertainties", "tabulate": "tabulate", "pyximport": "Cython",
     "Cython": "Cython", "gi": "PyGObject", "wx": "wxPython", "nbconvert": "nbconvert",
-    "ipykernel": "ipykernel"
+    "ipykernel": "ipykernel",
+    "setuptools": "setuptools", "pkg_resources": "setuptools", "OpenGL": "PyOpenGL",
+    "Cryptodome": "pycryptodomex", "pywt": "PyWavelets", "skopt": "scikit-optimize", "skbio": "scikit-bio",
+    "imblearn": "imbalanced-learn", "hydra": "hydra-core", "absl": "absl-py", "haiku": "dm-haiku",
+    "grpc": "grpcio", "googleapiclient": "google-api-python-client", "dns": "dnspython", "nacl": "PyNaCl",
+    "slugify": "python-slugify", "pdfminer": "pdfminer.six", "shapefile": "pyshp", "cairo": "pycairo",
+    "RPi": "RPi.GPIO", "paho": "paho-mqtt", "clr": "pythonnet", "bluetooth": "PyBluez",
+    "labjack": "labjack-ljm", "Xlib": "python-xlib", "speech_recognition": "SpeechRecognition",
+    "vlc": "python-vlc", "telebot": "pyTelegramBotAPI", "discord": "discord.py", "socketio": "python-socketio",
+    "websocket": "websocket-client", "bson": "pymongo", "llama_cpp": "llama-cpp-python",
+    "win32con": "pywin32", "win32gui": "pywin32", "pythoncom": "pywin32", "pywintypes": "pywin32",
+    "google.protobuf": "protobuf", "google.auth": "google-auth", "google.oauth2": "google-auth",
+    "google.cloud.storage": "google-cloud-storage", "google.cloud.bigquery": "google-cloud-bigquery",
+    "google.cloud.firestore": "google-cloud-firestore", "google.cloud.pubsub": "google-cloud-pubsub",
+    "google.cloud.pubsub_v1": "google-cloud-pubsub", "google.generativeai": "google-generativeai",
+    "google.genai": "google-genai", "azure.storage.blob": "azure-storage-blob", "azure.identity": "azure-identity",
+    "mpl_toolkits.basemap": "basemap", "ruamel.yaml": "ruamel.yaml", "mysql.connector": "mysql-connector-python"
   },
   "ambiguous": {
     "jwt": ["PyJWT", "jwt"],
-    "google": ["protobuf", "google-cloud-storage", "google-api-python-client"],
+    "google": ["protobuf", "google-cloud-storage", "google-api-python-client", "google-genai"],
+    "google.cloud": ["google-cloud-storage", "google-cloud-bigquery", "google-cloud-firestore", "google-cloud-pubsub"],
     "kafka": ["kafka-python", "confluent-kafka"],
     "snappy": ["python-snappy", "snappy"],
     "ldap": ["python-ldap", "ldap3"],
     "tf": ["tensorflow", "tf"],
-    "ffmpeg": ["ffmpeg-python", "python-ffmpeg"]
+    "ffmpeg": ["ffmpeg-python", "python-ffmpeg"],
+    "whisper": ["openai-whisper", "whisper"],
+    "cupy": ["cupy-cuda12x", "cupy-cuda11x", "cupy"]
+  },
+  "alternatives": {
+    "cv2": ["opencv-python-headless", "opencv-contrib-python", "opencv-contrib-python-headless"],
+    "faiss": ["faiss-gpu"],
+    "psycopg2": ["psycopg2"],
+    "tensorflow": ["tensorflow-cpu", "tensorflow-macos"],
+    "Crypto": ["pycrypto"],
+    "PIL": ["pillow-simd"],
+    "magic": ["python-magic-bin"],
+    "Levenshtein": ["Levenshtein"],
+    "osgeo": ["pygdal"],
+    "bson": ["bson"],
+    "igraph": ["python-igraph"],
+    "onnxruntime": ["onnxruntime-gpu"]
+  },
+  "not_on_pypi": {
+    "google.colab": "есть только в Google Colab: вне Colab замените drive.mount и пути /content/… на локальные",
+    "kaggle_secrets": "есть только в ноутбуках Kaggle: передайте секреты через переменные окружения",
+    "detectron2": "на PyPI его нет: ставится из GitHub (facebookresearch/detectron2) под нужную версию torch",
+    "apex": "NVIDIA Apex ставится из GitHub (NVIDIA/apex); apex на PyPI — другая библиотека",
+    "clip": "OpenAI CLIP ставится из GitHub (openai/CLIP); clip на PyPI — другая библиотека",
+    "PySpin": "ставится вместе с Spinnaker SDK с сайта производителя камеры; pyspin на PyPI — другая библиотека",
+    "matlab": "MATLAB Engine работает только с установленным MATLAB; matlab на PyPI — другая библиотека",
+    "azure": "метапакет azure устарел и не ставится: у каждого сервиса свой пакет, например azure-storage-blob",
+    "arcpy": "входит в ArcGIS Pro / ArcGIS Server, через pip не ставится",
+    "qgis": "входит в QGIS, через pip не ставится",
+    "rospy": "входит в ROS, через pip не ставится",
+    "rclpy": "входит в ROS 2, через pip не ставится"
+  },
+  "conda_to_pypi": {
+    "pytorch": "torch", "pytorch-gpu": "torch", "pytorch-cpu": "torch", "py-opencv": "opencv-python",
+    "matplotlib-base": "matplotlib", "pytables": "tables", "py-xgboost": "xgboost", "msgpack-python": "msgpack",
+    "python-graphviz": "graphviz", "pyqt": "PyQt5"
   }
 }

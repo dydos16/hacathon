@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from repropack.analysis import analyze
+from repropack.classify import MAPPING_FILE, parse_declared
 from repropack.intake import read_directory
+from repropack.packer import PACKAGE_NAME, default_requirements
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
@@ -230,3 +232,150 @@ def test_notebook_issues_and_usages_point_to_cells():
     wheres = {i.title: i.where for i in analysis.issues}
     assert wheres["Случайные числа без фиксированного seed"] == "exp.ipynb, ячейка 1, стр. 2"
     assert wheres["Ячейка ноутбука не разбирается как Python"] == "exp.ipynb"
+
+
+def packages_of(files) -> list[str]:
+    return [r.package for r in default_requirements(analyze(files))]
+
+
+@pytest.mark.parametrize("module, package, version", [
+    ("cv2", "opencv-python-headless", "4.9.0.80"), ("faiss", "faiss-gpu", "1.7.2"), ("psycopg2", "psycopg2", "2.9.9"),
+])
+def test_declared_variant_of_known_module_replaces_dictionary_default(module, package, version):
+    files = {"a.py": f"import {module}\n".encode(), "requirements.txt": f"{package}=={version}\n".encode()}
+    dep = deps_of(files)[module]
+    assert (dep.package, dep.status, dep.version) == (package, "объявлено в проекте", f"=={version}")
+    assert packages_of(files) == [package]
+
+
+def test_same_package_in_several_files_keeps_the_pinned_version():
+    numpy = {"a.py": b"import numpy\n"}
+    assert deps_of({**numpy, "environment.yml": b"dependencies:\n  - numpy=1.26.4=py311h_0\n",
+                    "requirements.txt": b"numpy\n"})["numpy"].version == "==1.26.4"
+    assert deps_of({**numpy, "requirements.txt": b"numpy==1.26.4\n",
+                    "pyproject.toml": b'[project]\ndependencies = ["numpy"]\n'})["numpy"].version == "==1.26.4"
+    seaborn = deps_of({"exp.ipynb": notebook("!pip install seaborn==0.13.2\nimport seaborn\n"),
+                       "requirements.txt": b"seaborn\n"})["seaborn"]
+    assert (seaborn.version, seaborn.version_source) == ("==0.13.2", "exp.ipynb (!pip install)")
+
+
+def test_conflicting_versions_are_reported_and_do_not_depend_on_file_order():
+    files = {"sub/requirements.txt": b"numpy==1.24.0\n", "a.py": b"import numpy\n",
+             "requirements.txt": b"numpy==1.26.4\n"}
+    dep = deps_of(files)["numpy"]
+    assert deps_of(dict(reversed(files.items())))["numpy"] == dep
+    assert (dep.version, dep.version_source) == ("==1.26.4", "requirements.txt")
+    assert dep.note == "версии в файлах расходятся: ==1.26.4 (requirements.txt), ==1.24.0 (sub/requirements.txt)"
+
+
+def test_package_declared_for_pip_and_conda_is_not_conda_only():
+    files = {"a.py": b"import numpy\n", "requirements.txt": b"openpyxl==3.1.2\n",
+             "x/environment.yml": b"dependencies:\n  - openpyxl=3.1\n"}
+    dep = deps_of(files)["openpyxl"]
+    assert (dep.category, dep.version) == ("declared_only", "==3.1.2")
+    assert "версии в файлах расходятся" in dep.note and "openpyxl" in packages_of(files)
+
+
+def test_conda_package_names_are_translated_to_pypi():
+    env = b"dependencies:\n  - pytorch=2.1.0\n  - py-opencv=4.8\n  - matplotlib-base=3.8\n  - \"numpy>=1.26\"\n"
+    deps = deps_of({"a.py": b"import torch, cv2, matplotlib, numpy\n", "environment.yml": env})
+    assert {m: (d.package, d.version) for m, d in deps.items()} == {
+        "torch": ("torch", "==2.1.0.*"), "cv2": ("opencv-python", "==4.8.*"),
+        "matplotlib": ("matplotlib", "==3.8.*"), "numpy": ("numpy", ">=1.26")}
+
+
+def test_namespace_packages_are_resolved_by_full_module_path():
+    source = (b"from google.protobuf import message\nimport google.cloud.storage\nfrom google.cloud import bigquery\n"
+              b"from mpl_toolkits.mplot3d import Axes3D\nfrom mpl_toolkits.basemap import Basemap\n"
+              b"from azure.storage.blob import BlobServiceClient\nimport ruamel.yaml\nimport numpy.linalg\n")
+    deps = deps_of({"a.py": source})
+    assert {m: d.package for m, d in deps.items()} == {
+        "google.protobuf": "protobuf", "google.cloud.storage": "google-cloud-storage",
+        "google.cloud": "google-cloud-storage", "mpl_toolkits": "matplotlib", "mpl_toolkits.basemap": "basemap",
+        "azure.storage.blob": "azure-storage-blob", "ruamel.yaml": "ruamel.yaml", "numpy": "numpy"}
+    assert [m for m, d in deps.items() if d.needs_confirmation] == ["google.cloud"]
+
+
+def test_dotted_distribution_declared_by_author_matches_import():
+    files = {"a.py": b"import zope.interface\n", "requirements.txt": b"zope.interface==6.4\n"}
+    dep = deps_of(files)["zope.interface"]
+    assert (dep.package, dep.version, dep.needs_confirmation) == ("zope.interface", "==6.4", False)
+    assert packages_of(files) == ["zope.interface"]
+
+
+@pytest.mark.parametrize("source, module, hint", [
+    (b"from google.colab import drive\n", "google.colab", "Google Colab"),
+    (b"import detectron2\n", "detectron2", "GitHub"),
+    (b"from apex import amp\n", "apex", "другая библиотека"),
+    (b"import matlab.engine\n", "matlab", "MATLAB"),
+    (b"from azure.foo import bar\n", "azure", "azure-storage-blob"),
+])
+def test_modules_not_installable_from_pypi_are_not_guessed(source, module, hint):
+    analysis = analyze({"a.py": source})
+    dep = next(d for d in analysis.dependencies if d.module == module)
+    assert (dep.package, dep.status, dep.needs_confirmation) == ("", "не с PyPI", True)
+    assert hint in dep.note and default_requirements(analysis) == ()
+    assert any(module in i.title and hint in i.detail for i in analysis.issues)
+    assert deps_of({"a.py": source}, use_local_env=True)[module].version == ""
+
+
+@pytest.mark.parametrize("module, package", [
+    ("pywt", "PyWavelets"), ("OpenGL", "PyOpenGL"), ("setuptools", "setuptools"), ("pkg_resources", "setuptools"),
+    ("skopt", "scikit-optimize"), ("imblearn", "imbalanced-learn"), ("RPi", "RPi.GPIO"), ("clr", "pythonnet"),
+    ("googleapiclient", "google-api-python-client"), ("hydra", "hydra-core"),
+])
+def test_more_renamed_modules_are_known(module, package):
+    dep = deps_of({"a.py": f"import {module}\n".encode()})[module]
+    assert (dep.package, dep.needs_confirmation) == (package, False)
+
+
+@pytest.mark.parametrize("module, first", [("whisper", "openai-whisper"), ("cupy", "cupy-cuda12x")])
+def test_modules_shadowed_by_unrelated_pypi_projects_need_confirmation(module, first):
+    dep = deps_of({"a.py": f"import {module}\n".encode()})[module]
+    assert dep.needs_confirmation and dep.candidates[0] == first
+
+
+def test_mapping_file_contains_only_valid_package_names():
+    data = json.loads(MAPPING_FILE.read_text(encoding="utf-8"))
+    names = [*data["known"].values(), *data["conda_to_pypi"].values(),
+             *(n for section in ("ambiguous", "alternatives") for names in data[section].values() for n in names)]
+    assert all(PACKAGE_NAME.match(n) for n in names)
+    sections = [set(data[s]) for s in ("known", "ambiguous", "not_on_pypi")]
+    assert sum(map(len, sections)) == len(set().union(*sections))
+
+
+def test_setup_py_setup_cfg_and_pipfile_are_read_statically():
+    setup_py = (b"from setuptools import setup\nsetup(name='x', python_requires='>=3.10',\n"
+                b"      install_requires=['numpy==1.26.4', 'scipy>=1.11'])\n")
+    setup_cfg = b"[options]\npython_requires = >=3.9\ninstall_requires =\n    pandas==2.2.0\n    file: req.txt\n"
+    pipfile = (b'[packages]\ntqdm = "==4.66.1"\nrich = "*"\nclick = {version = ">=8.1", extras = ["x"]}\n'
+               b'lib = {git = "https://github.com/x/lib.git"}\n[requires]\npython_version = "3.10"\n')
+    deps, python = parse_declared({"setup.py": setup_py, "pkg/setup.cfg": setup_cfg, "Pipfile": pipfile})
+    assert {n: d.spec for n, d in deps.items()} == {
+        "numpy": "==1.26.4", "scipy": ">=1.11", "pandas": "==2.2.0", "tqdm": "==4.66.1", "rich": "",
+        "click": ">=8.1"}
+    assert python == "3.10"
+    assert parse_declared({"setup.py": setup_py, "pkg/setup.cfg": setup_cfg})[1] == ">=3.9"
+
+
+@pytest.mark.parametrize("name, text", [
+    ("setup.py", b"from setuptools import setup\nsetup(install_requires=REQUIREMENTS)\n"),
+    ("setup.py", b"setup(install_requires=['numpy'] + extra)\n"),
+    ("setup.py", b"def broken(:\n"),
+    ("setup.py", b"x = " + b"(" * 300 + b")" * 300 + b"\n"),
+    ("setup.py", b"setup(name=1, python_requires=3)\nother(install_requires=['numpy'])\n"),
+    ("setup.py", b"import setuptools\nsetuptools.setup(**CONFIG)\n"),
+    ("setup.py", b"print('setup is elsewhere')\n"),
+    ("setup.cfg", b"[options\ninstall_requires = numpy\n"),
+    ("setup.cfg", b"[metadata]\nname = x\n"),
+    ("Pipfile", b"[packages\n"),
+])
+def test_unreadable_declarations_are_ignored(name, text):
+    assert parse_declared({name: text}) == ({}, "")
+
+
+def test_requirements_saved_by_windows_tools_are_read():
+    text = "numpy==1.26.4\r\npandas==2.2.0\r\n"
+    for data in (b"\xef\xbb\xbf" + text.encode(), text.encode("utf-16")):
+        assert {n: d.spec for n, d in parse_declared({"requirements.txt": data})[0].items()} == {
+            "numpy": "==1.26.4", "pandas": "==2.2.0"}
