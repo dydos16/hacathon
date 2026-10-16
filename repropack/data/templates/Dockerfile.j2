@@ -1,7 +1,11 @@
 # Шаблон, созданный repro-packer. Проверьте версию Python и системные пакеты.
 FROM python:{{ python_version }}-slim
 WORKDIR /app
-COPY requirements.txt .
+{% if system_packages %}# Системные библиотеки по справочнику repro-packer (в slim-образе их нет):
+{% for package, apt in system_packages %}#   {{ package }}: {{ apt }}
+{% endfor %}RUN apt-get update && apt-get install -y --no-install-recommends {{ system_apt }} \
+ && rm -rf /var/lib/apt/lists/*
+{% endif %}COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY project/ .
 CMD {{ cmd_json }}

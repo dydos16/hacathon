@@ -16,6 +16,9 @@ LEVEL_ORDER = {"high": 0, "medium": 1, "info": 2}
 UNRESOLVABLE_DATA = "*{}<>|%"  # шаблоны имён (glob, %-формат): конкретный файл по ним не найти
 PYTHON_CLAUSE = re.compile(r"(\^|~=|~|===|==|!=|<=|>=|<|>)?\s*(\d+)(?:\.(\d+))?(?:\.[\d*]+)*")
 CONDA_ONLY_SHOWN = 8
+PLACES_SHOWN = 3
+AUXILIARY_PATH = re.compile(r"(^|/)((setup|conftest|noxfile)\.py|test_[^/]*|[^/]*_test\.py)$"
+                            r"|(^|/)(tests?|docs?|migrations)/")
 
 
 @dataclass(frozen=True)
@@ -56,11 +59,30 @@ def _scan_all(files: dict[str, bytes]) -> list[FileScan]:
     return scans
 
 
+def _is_auxiliary(path: str) -> bool:
+    """Тесты, setup.py, conftest.py, документация, миграции — не то, что запускают для эксперимента."""
+    return bool(AUXILIARY_PATH.search(path))
+
+
+def _imported_modules(scans: list[FileScan]) -> set[str]:
+    """Что импортирует сам проект; импорты из тестов не в счёт — тесты импортируют и главный скрипт."""
+    return {ref.module for scan in scans if not _is_auxiliary(scan.path) for ref in scan.imports if ref.module}
+
+
+def _is_imported(path: str, imported: set[str]) -> bool:
+    """Файл, который импортируют другие файлы проекта, — библиотека, а не скрипт («model.py» для «train.py»)."""
+    dotted = "." + PurePosixPath(path).with_suffix("").as_posix().replace("/", ".")
+    return any(dotted.endswith(f".{module}") for module in imported)
+
+
 def _entry_candidates(scans: list[FileScan]) -> tuple[str, ...]:
+    imported = _imported_modules(scans)
+
     def rank(scan: FileScan) -> tuple:
-        name = PurePosixPath(scan.path).name
-        return (not scan.has_main_guard, name not in ENTRY_NAMES, scan.path.count("/"),
-                scan.path.endswith(".ipynb"), name.startswith("test"), scan.path)
+        runs_itself = scan.has_main_guard or any(f.code == "cli_args" for f in scan.findings)
+        return (_is_auxiliary(scan.path), _is_imported(scan.path, imported), not runs_itself,
+                PurePosixPath(scan.path).name not in ENTRY_NAMES, scan.path.count("/"),
+                scan.path.endswith(".ipynb"), scan.path)
     runnable = [s for s in scans if not PurePosixPath(s.path).name.startswith("__")]
     return tuple(s.path for s in sorted(runnable, key=rank))
 
@@ -79,25 +101,53 @@ def _python_range(hint: str) -> tuple[tuple[int, int] | None, tuple[int, int] | 
     return low, high
 
 
-def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) -> tuple[str, str]:
+def _version(version: tuple[int, int]) -> str:
+    return f"{version[0]}.{version[1]}"
+
+
+def _removed_conflict(blocking: list[str], required: tuple[int, int]) -> list[Issue]:
+    """Коду нужен новый Python, а часть модулей в нём уже удалена: одной версии, где работает всё, нет."""
+    if not blocking:
+        return []
+    lost = ", ".join(f"«{m}»" for m in blocking if not REMOVED_STDLIB[m][1])
+    fix = (f"Замените в коде: {lost}" if lost
+           else "модули дадут пакеты-замены из requirements.txt — проверьте запуск через verify.sh")
+    names = ", ".join(f"«{m}»" for m in blocking)
+    return [Issue("high" if lost else "medium", "Коду нужны несовместимые версии Python",
+                  f"синтаксис или модули кода требуют Python ≥ {_version(required)}, а {names} в нём уже нет. "
+                  f"Выбрана {_version(required)}: на более старой код даже не разберётся. {fix}")]
+
+
+def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) -> tuple[str, str, list[Issue]]:
+    """Версия Python, причина выбора и противоречия, если одной версии на всё нет: о них говорим, а не молчим."""
     syntax_min = max((s.min_python for s in scans), default=NO_REQUIREMENT)
     stdlib_min = max((STDLIB_ADDED[d.module] for d in deps if d.module in STDLIB_ADDED), default=NO_REQUIREMENT)
     required = max(syntax_min, stdlib_min)
     chosen = max(DEFAULT_PYTHON, required)
-    reasons = [f"по коду нужен ≥ {required[0]}.{required[1]}"] if required > NO_REQUIREMENT else []
+    reasons = [f"по коду нужен ≥ {_version(required)}"] if required > NO_REQUIREMENT else []
+    issues = []
     low, high = _python_range(hint)
     if low or high:
         lifted = max(chosen, low or chosen)
         chosen = max(min(lifted, high or lifted), required)  # синтаксис кода важнее объявленной автором границы
         reasons.append(f"в проекте указано «{hint}»")
-    removed = [REMOVED_STDLIB[d.module][0] for d in deps
-               if d.category == "removed" and REMOVED_STDLIB[d.module][0] != PYTHON2]
+    removed = sorted((REMOVED_STDLIB[d.module][0], d.module) for d in deps
+                     if d.category == "removed" and REMOVED_STDLIB[d.module][0] != PYTHON2)
+    removed_note = ""
     if removed:
-        ceiling = min(removed)
-        chosen = min(chosen, (ceiling[0], ceiling[1] - 1))
-        reasons.append(f"используются модули, удалённые в {ceiling[0]}.{ceiling[1]}")
+        (major, minor), module = removed[0]
+        removed_note = f"«{module}» удалён в {major}.{minor}"
+        issues += _removed_conflict([m for version, m in removed if version <= required], required)
+        chosen = max(min(chosen, (major, minor - 1)), required)  # код, который не разбирается, не запустится вовсе
+        reasons.append(f"используются модули, удалённые в {major}.{minor}")
+    conflict = (f"код требует ≥ {_version(required)}" if high and chosen > high
+                else removed_note if low and chosen < low else "")
+    if conflict:
+        issues.append(Issue("medium", "Версия Python расходится с объявленной в проекте",
+                            f"в проекте указано «{hint}», но {conflict} — выбрана {_version(chosen)}. "
+                            "Исправьте объявление или код"))
     reason = "; ".join(reasons) or "современная стабильная версия; особых требований в коде не найдено"
-    return f"{chosen[0]}.{chosen[1]}", reason
+    return _version(chosen), reason, issues
 
 
 def _resolve_data(ref: str, importer: str, files: dict[str, bytes]) -> str | None:
@@ -255,31 +305,45 @@ def _secret_issues(secret_files: tuple[str, ...], secrets: tuple[SecretHit, ...]
     return issues
 
 
+def _merge_repeats(issues: list[Issue]) -> list[Issue]:
+    """Одно и то же предупреждение из многих файлов — одной строкой со списком мест, а не десятком строк."""
+    places: dict[tuple[str, str, str], list[str]] = {}
+    for issue in issues:
+        places.setdefault((issue.level, issue.title, issue.detail), []).append(issue.where)
+    merged = []
+    for (level, title, detail), wheres in places.items():
+        unique = list(dict.fromkeys(w for w in wheres if w))
+        more = len(unique) - PLACES_SHOWN
+        merged.append(Issue(level, title, detail,
+                            ", ".join(unique[:PLACES_SHOWN]) + (f" и ещё {more}" if more > 0 else "")))
+    return merged
+
+
 def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     scans = _scan_all(files)
     deps = classify(scans, files, use_local_env)
     declared, python_hint = parse_declared(files)
-    python, python_reason = _suggest_python(scans, deps, python_hint)
+    python, python_reason, python_issues = _suggest_python(scans, deps, python_hint)
     secret_files = tuple(p for p in files if is_secret_file(p))
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
                     for hit in find_secrets(p, decode(data)))
     data_found, data_missing = _data_refs(scans, files)
     hygiene = _hygiene(files, data_found, bool(declared))
 
-    issues = _finding_issues(scans) + _relative_import_issues(scans, files)
+    issues = python_issues + _finding_issues(scans) + _relative_import_issues(scans, files)
     issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(secret_files, secrets)
     issues += [Issue("high", f"Файл данных «{ref}» не найден",
                      "приложите пример данных или опишите в README, где его взять "
                      "(если это файл, который скрипт сам создаёт, — пропустите)", where)
                for ref, where in data_missing]
-    if sum(s.has_main_guard for s in scans) > 1:
+    if sum(s.has_main_guard and not _is_auxiliary(s.path) for s in scans) > 1:
         issues.append(Issue("info", "Несколько точек входа", "выберите, какой файл запускать"))
     issues += [Issue("info", f"Нет: {name}", "не обязательно, но помогает повторить эксперимент")
                for name, present in hygiene if not present]
 
     return Analysis(
         files=files, scans=tuple(scans), dependencies=tuple(deps),
-        issues=tuple(sorted(issues, key=lambda i: LEVEL_ORDER[i.level])),
+        issues=tuple(sorted(_merge_repeats(issues), key=lambda i: LEVEL_ORDER[i.level])),
         entry_candidates=_entry_candidates(scans), suggested_python=python, python_reason=python_reason,
         secret_files=secret_files, secrets=secrets, data_found=tuple(data_found),
         data_missing=tuple(data_missing), hygiene=hygiene,

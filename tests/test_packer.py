@@ -133,11 +133,60 @@ def test_notebook_entry_point_gets_runner_packages():
     assert "--execute exp.ipynb" in rendered["verify.sh"]
 
 
+def test_docker_installs_system_libraries_of_known_packages():
+    archive, root = pack("messy_lab_project")
+    dockerfile = archive.read(f"{root}/Dockerfile").decode()
+    assert "opencv-python" in dockerfile and "apt-get install -y --no-install-recommends libgl1" in dockerfile
+    assert dockerfile.index("apt-get") < dockerfile.index("pip install")
+    assert "sudo apt-get install libgl1 libglib2.0-0" in archive.read(f"{root}/README.md").decode()
+    archive, root = pack("numpy_pandas_script")
+    assert "apt-get" not in archive.read(f"{root}/Dockerfile").decode()
+
+
+def test_docker_context_skips_local_venv_and_logs():
+    archive, root = pack("local_module_project")
+    assert ".repro-venv" in archive.read(f"{root}/.dockerignore").decode()
+
+
+FAKE_PYTHON = '#!/bin/sh\ncase "$1" in\n  --version) echo "Python $FAKE.0" ;;\n  -c) echo "$FAKE" ;;\n  *) exit 3 ;;\nesac\n'
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="нужен POSIX sh")
+@pytest.mark.parametrize("found, warned", [("3.9", True), ("3.11", False)])
+def test_verify_sh_warns_about_other_python_version_and_keeps_exit_code(tmp_path: Path, found, warned):
+    archive, root = pack("local_module_project", python_version="3.11")
+    archive.extractall(tmp_path)
+    fake = tmp_path / "fake-python"
+    fake.write_text(FAKE_PYTHON)
+    fake.chmod(0o755)
+    result = subprocess.run(["sh", "verify.sh"], cwd=tmp_path / root, capture_output=True, text=True,
+                            env={"PATH": "/usr/bin:/bin", "PYTHON": str(fake), "FAKE": found})
+    log = (tmp_path / root / "verify_log.txt").read_text()
+    assert result.returncode == 1 and "не удалось создать venv" in log  # подделка не умеет создавать venv
+    assert ("ВНИМАНИЕ: нужен Python 3.11, а запускается 3.9" in log) is warned
+
+
+def test_verify_ps1_matches_verify_sh_checks():
+    archive, root = pack("local_module_project", python_version="3.11")
+    ps1 = archive.read(f"{root}/verify.ps1").decode("utf-8-sig")
+    assert "ВНИМАНИЕ: нужен Python 3.11" in ps1 and "-ne '3.11'" in ps1
+    assert "-not (Test-Path $VPy)" in ps1  # без python в PATH скрипт не должен дойти до «exit $null» = 0
+
+
 def test_cli_builds_package(tmp_path: Path, capsys):
     output = tmp_path / "out.zip"
     assert main([str(EXAMPLES / "messy_lab_project"), "-o", str(output)]) == 0
     assert zipfile.is_zipfile(output)
-    assert "[критично]" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[критично]" in out and "Итого: 6 критичных" in out and "используются модули, удалённые" in out
+
+
+def test_cli_version_and_unwritable_output(tmp_path: Path, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+    assert exit_info.value.code == 0 and "repropack 0." in capsys.readouterr().out
+    assert main([str(EXAMPLES / "local_module_project"), "-o", str(tmp_path / "no" / "such" / "dir.zip")]) == 1
+    assert "не удалось сохранить" in capsys.readouterr().err
 
 
 def test_cli_reports_errors_with_exit_code(tmp_path: Path, capsys):

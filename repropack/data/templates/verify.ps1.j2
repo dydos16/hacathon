@@ -9,9 +9,14 @@ function Log($Text) { $Text | Tee-Object -FilePath $Log -Append }
 Set-Content $Log ""
 Log "== Проверка: $(Get-Date)"
 Log "Ожидается Python {{ python_version }}, найден: $(& $Py --version 2>&1)"
+$Found = & $Py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+if ("$Found" -ne '{{ python_version }}') {
+  $Shown = if ($Found) { "$Found" } else { "неизвестная версия" }
+  Log "ВНИМАНИЕ: нужен Python {{ python_version }}, а запускается $Shown — результат может отличаться. Другой интерпретатор: задайте путь к нему в переменной окружения PYTHON"
+}
 if (Test-Path .repro-venv) { Remove-Item -Recurse -Force .repro-venv }
 & $Py -m venv .repro-venv *>> $Log
-if ($LASTEXITCODE) { Log "ОШИБКА: не удалось создать venv"; exit 1 }
+if ($LASTEXITCODE -or -not (Test-Path $VPy)) { Log "ОШИБКА: не удалось создать venv"; exit 1 }
 
 Log "-- Установка зависимостей из requirements.txt"
 & $VPy -m pip install --disable-pip-version-check -r requirements.txt *>> $Log

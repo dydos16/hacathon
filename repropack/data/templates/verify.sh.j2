@@ -10,6 +10,10 @@ log() { echo "$1" | tee -a "$LOG"; }
 : > "$LOG"
 log "== Проверка: $(date)"
 log "Ожидается Python {{ python_version }}, найден: $("$PYTHON" --version 2>&1)"
+FOUND=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+if [ "$FOUND" != "{{ python_version }}" ]; then
+  log "ВНИМАНИЕ: нужен Python {{ python_version }}, а запускается ${FOUND:-неизвестная версия} — результат может отличаться. Другой интерпретатор: PYTHON=python{{ python_version }} sh verify.sh"
+fi
 rm -rf .repro-venv
 "$PYTHON" -m venv .repro-venv >> "$LOG" 2>&1 || { log "ОШИБКА: не удалось создать venv"; exit 1; }
 

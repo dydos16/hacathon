@@ -26,6 +26,14 @@ PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?$"
 PYTHON_VERSION = re.compile(r"^\d+\.\d+$")
 VERSION_OPERATORS = ("==", ">=", "<=", "~=", "!=", ">", "<")
 NOTEBOOK_RUNNERS = ("nbconvert", "ipykernel")
+# Системные библиотеки Debian, без которых пакет не ставится или не импортируется в образе python:*-slim
+SYSTEM_PACKAGES = {
+    "opencv-python": "libgl1 libglib2.0-0", "opencv-contrib-python": "libgl1 libglib2.0-0",
+    "psycopg2": "libpq-dev gcc", "mysqlclient": "default-libmysqlclient-dev pkg-config gcc",
+    "pyaudio": "portaudio19-dev gcc", "pygraphviz": "graphviz graphviz-dev gcc",
+}
+# Docker отправляет демону всю папку: окружение и логи verify.sh не нужны и весят сотни мегабайт
+DOCKERIGNORE = ".repro-venv/\nverify_log.txt\nrun_output.txt\n"
 
 
 @dataclass(frozen=True)
@@ -125,12 +133,14 @@ def slugify(name: str) -> str:
 
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
+    system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs if normalize(r.package) in SYSTEM_PACKAGES]
     run_tail = shlex.join(parts)
     run_log = f"-- Запуск: python {run_tail}"
     return {
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
         "python_version": options.python_version, "python_reason": analysis.python_reason,
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
+        "system_packages": system, "system_apt": " ".join(dict.fromkeys(" ".join(a for _, a in system).split())),
         "run_tail": run_tail, "run_command": f"python {run_tail}", "cmd_json": json.dumps(["python", *parts]),
         "run_tail_ps": " ".join(map(ps_quote, parts)),
         "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
@@ -164,7 +174,7 @@ def render_package(analysis: Analysis, options: PackOptions, created: str | None
     ctx = _context(analysis, options, reqs, created)
     rendered = {name: TEMPLATES.get_template(f"{name}.j2").render(ctx)
                 for name in ("README.md", "REPORT.md", "Dockerfile", "verify.sh", "verify.ps1")}
-    return {**rendered, "requirements.txt": requirements_text(reqs, created),
+    return {**rendered, "requirements.txt": requirements_text(reqs, created), ".dockerignore": DOCKERIGNORE,
             "repro.json": _manifest(analysis, options, reqs, ctx)}
 
 

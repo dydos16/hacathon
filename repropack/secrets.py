@@ -18,10 +18,20 @@ PATTERNS = [
     ("ключ OpenAI/Anthropic", re.compile(r"\b(sk-(?:ant-)?[A-Za-z0-9_-]{20,})\b")),
     ("токен Slack", re.compile(r"\b(xox[abposr]-[A-Za-z0-9-]{10,})\b")),
     ("токен Telegram-бота", re.compile(r"\b(\d{8,10}:[A-Za-z0-9_-]{35})\b")),
+    ("ключ Google API", re.compile(r"\b(AIza[0-9A-Za-z_-]{35})(?![\w-])")),
+    ("токен Hugging Face", re.compile(r"\b(hf_[A-Za-z0-9]{30,})\b")),
+    ("ключ Stripe", re.compile(r"\b([rs]k_live_[0-9A-Za-z]{20,})\b")),
+    ("токен JWT", re.compile(r"\b(eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,})")),
+    # scheme://user:пароль@host; подстановки ({password}, ${PW}, %(pw)s) и примеры из документации
+    # (user:password@, xxx:xxx@) — не секрет
+    ("пароль в адресе подключения", re.compile(
+        r"\b[a-z][a-z0-9+.-]*://[^\s:/@'\"\[]*:(?!(?i:x+|\*+|pass|passwd|password|pwd|secret)@)"
+        r"([^\s:/@'\"{}$<>%]+)@")),
     # Имя переменной должно заканчиваться ключевым словом: API_KEY, db_password — да, tokenizer, max_tokens — нет
     ("пароль/токен в коде", re.compile(
         r"""(?i)\b\w*?(?:api_?key|secret(?:_?key)?|token|passw(?:or)?d|pwd)\b["']?\s*[:=]\s*["']([^"'\s]{8,})["']""")),
 ]
+MASK_REVEAL_FROM = 20
 PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 
 
@@ -47,7 +57,15 @@ def _is_text(path: str) -> bool:
 
 
 def _mask(value: str) -> str:
-    return f"{value[:4]}…{value[-2:]}" if len(value) > 8 else "…"
+    """Начало и конец — только у длинных значений: у короткого пароля 6 символов — это почти весь пароль."""
+    return f"{value[:4]}…{value[-2:]}" if len(value) >= MASK_REVEAL_FROM else "…"
+
+
+def _redact_match(match: re.Match) -> str:
+    """Заменяет только само значение (группу), а не все его вхождения: в «password = 'password'» имя остаётся."""
+    group = match.lastindex or 0
+    start, end = match.start(group) - match.start(), match.end(group) - match.start()
+    return f"{match.group(0)[:start]}<REDACTED>{match.group(0)[end:]}"
 
 
 def find_secrets(path: str, text: str) -> list[SecretHit]:
@@ -67,7 +85,7 @@ def redact(text: str) -> str:
     """Заменяет найденные значения на <REDACTED>, остальной текст не трогает."""
     text = PRIVATE_KEY_BLOCK.sub("<REDACTED PRIVATE KEY>", text)
     for _, pattern in PATTERNS:
-        text = pattern.sub(lambda m: m.group(0).replace(m.group(m.lastindex or 0), "<REDACTED>"), text)
+        text = pattern.sub(_redact_match, text)
     return text
 
 

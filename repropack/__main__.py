@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__
 from .analysis import analyze
 from .intake import IntakeError, read_directory, read_upload
 from .packer import LEVELS, PackOptions, build_zip, default_requirements
@@ -17,6 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python", help="версия Python (по умолчанию — предложенная анализом)")
     parser.add_argument("--args", default="", help="аргументы командной строки для запуска")
     parser.add_argument("--local-env", action="store_true", help="разрешить читать версии из текущей среды")
+    parser.add_argument("--version", action="version", version=f"repropack {__version__}")
     args = parser.parse_args(argv)
 
     try:
@@ -35,17 +37,21 @@ def main(argv: list[str] | None = None) -> int:
         python_version=args.python or analysis.suggested_python,
         requirements=default_requirements(analysis), run_args=args.args,
     )
+    output = args.output or Path(f"{name}-repro.zip")
     try:
-        package = build_zip(analysis, options)
+        output.write_bytes(build_zip(analysis, options))
     except ValueError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
-    output = args.output or Path(f"{name}-repro.zip")
-    output.write_bytes(package)
+    except OSError as exc:
+        print(f"Ошибка: не удалось сохранить пакет в {output}: {exc.strerror or exc}", file=sys.stderr)
+        return 1
     for issue in analysis.issues:
         where = f" ({issue.where})" if issue.where else ""
         print(f"[{LEVELS[issue.level]}] {issue.title}{where}")
-    print(f"\nТочка входа: {options.entry_point}; Python {options.python_version}")
+    counts = {level: sum(i.level == level for i in analysis.issues) for level in LEVELS}
+    print(f"\nИтого: {counts['high']} критичных, {counts['medium']} требуют решения, {counts['info']} к сведению")
+    print(f"Точка входа: {options.entry_point}; Python {options.python_version} ({analysis.python_reason})")
     print(f"Пакет сохранён: {output}")
     return 0
 

@@ -20,7 +20,8 @@ powershell -ExecutionPolicy Bypass -File verify.ps1   # Windows
 
 - Python **{{ python_version }}** ({{ python_reason }})
 - Пакеты из `requirements.txt` ({{ requirements|length }} шт.){% if unknown_versions %}; версии не зафиксированы для: {{ unknown_versions|join(", ") }}{% endif %}
-
+{% if system_packages %}- Системные библиотеки для {{ system_packages|map(attribute=0)|join(", ") }} (Debian/Ubuntu): `sudo apt-get install {{ system_apt }}` — в Docker ставятся автоматически
+{% endif %}
 ## Установка вручную
 
 ```bash
@@ -68,4 +69,4 @@ docker run --rm {{ slug }}
 
 - Побитово одинаковый результат на разных ОС, процессорах и версиях библиотек.
 - Точные версии пакетов: по исходному коду их восстановить нельзя, поэтому зафиксируйте их после первой успешной проверки (`requirements.lock.txt`).
-- Системные зависимости (компиляторы, CUDA, GDAL и т. п.) не определяются.
+- Системные зависимости: известны только для нескольких популярных пакетов (OpenCV, psycopg2 и др.); CUDA, GDAL, компиляторы и т. п. не определяются.
