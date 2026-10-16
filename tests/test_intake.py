@@ -308,3 +308,13 @@ def test_cli_checks_file_type_and_size_before_reading(tmp_path: Path, monkeypatc
     monkeypatch.setattr(intake, "MAX_UNPACKED_BYTES", 5)
     with pytest.raises(IntakeError, match="слишком большая"):
         read_directory(tmp_path)
+
+
+def test_record_limit_counts_real_central_directory_entries_not_the_declared_number(monkeypatch):
+    """Аудит: лимит записей брался из конца архива, а zipfile читает каталог по размеру — архив в 14 МБ,
+    объявивший одну запись, превращался в 300 тысяч объектов в памяти."""
+    monkeypatch.setattr(intake, "MAX_ZIP_RECORDS", 2)
+    archive = bytearray(make_zip({"main.py": b"", "a.py": b"", "b.py": b""}))
+    archive[-14:-10] = b"\x01\x00\x01\x00"  # число записей на диске и всего: «1»
+    with pytest.raises(IntakeError, match="записей"):
+        read_upload([("p.zip", bytes(archive))])

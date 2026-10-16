@@ -5,7 +5,6 @@
 
 import io
 import stat
-import struct
 import unicodedata
 import zipfile
 import zlib
@@ -17,11 +16,9 @@ MAX_FILES = 2000
 # Записи центрального каталога, включая служебные: каждая становится объектом в памяти ещё до фильтрации.
 # ponytail: потолок ~ десятки МБ памяти на запрос; при большем — потоковый разбор каталога
 MAX_ZIP_RECORDS = 50_000
-EOCD_SIGNATURE = b"PK\x05\x06"  # конец центрального каталога ZIP
-EOCD_SIZE = 22
-MAX_ZIP_COMMENT = 0xFFFF
-ENTRY_COUNT_OFFSET = 10  # число записей в конце каталога: 2 байта, смещение от сигнатуры
-ENTRY_COUNT = struct.Struct("<H")
+# Каждая запись каталога начинается с этой сигнатуры: их число в байтах архива — верхняя граница записей,
+# которые создаст zipfile. Число из конца архива не годится: zipfile читает каталог по размеру, а не по нему.
+CENTRAL_DIR_SIGNATURE = b"PK\x01\x02"
 # Управляющие (Cc), невидимые и смена направления текста (Cf: U+200B, U+FEFF, U+202E), разрывы строк (Zl, Zp)
 HIDDEN_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}
 # Имена устройств Windows: с любым расширением и в любом регистре такой файл там не создать
@@ -84,14 +81,6 @@ def _entry_name(info: zipfile.ZipInfo) -> str:
         return raw.decode("cp866")
 
 
-def _declared_record_count(data: bytes) -> int | None:
-    """Число записей из конца архива: проверяется до того, как zipfile создаст объект на каждую запись."""
-    start = data.rfind(EOCD_SIGNATURE, max(0, len(data) - EOCD_SIZE - MAX_ZIP_COMMENT))
-    if start < 0 or start + EOCD_SIZE > len(data):
-        return None
-    return ENTRY_COUNT.unpack_from(data, start + ENTRY_COUNT_OFFSET)[0]
-
-
 def _check_unique(paths: list[str]) -> None:
     """Пути, совпадающие без учёта регистра, на macOS и Windows — один файл: лучше ошибка, чем тихая подмена."""
     seen: dict[str, str] = {}
@@ -116,8 +105,7 @@ def _strip_common_root(files: dict[str, bytes]) -> dict[str, bytes]:
 def read_zip(data: bytes) -> dict[str, bytes]:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise IntakeError(f"Архив больше {MAX_ARCHIVE_BYTES // 1024 // 1024} МБ")
-    declared = _declared_record_count(data)
-    if declared is not None and declared > MAX_ZIP_RECORDS:
+    if data.count(CENTRAL_DIR_SIGNATURE) > MAX_ZIP_RECORDS:  # до того, как zipfile создаст объект на каждую
         raise IntakeError(f"В архиве больше {MAX_ZIP_RECORDS} записей, включая служебные (.git, .venv): "
                           "уберите их из архива")
     try:
