@@ -159,7 +159,7 @@ def test_messy_project_reports_every_reproducibility_hazard():
     analysis = analyze(read_directory(EXAMPLES / "messy_lab_project"))
     titles = " | ".join(i.title for i in analysis.issues)
     for expected in ("Абсолютный путь", "Динамический импорт", "distutils", "Файл с секретами",
-                     "Похоже на секрет", "spectra.xlsx", "seed", "jwt", "labtools_internal", "Версии неизвестны"):
+                     "Похоже на секрет", "spectra\\.xlsx", "seed", "jwt", "labtools_internal", "Версии неизвестны"):
         assert expected in titles, expected
     assert "config.yaml" in analysis.data_found
     assert analysis.entry_candidates[0] == "analysis.py"

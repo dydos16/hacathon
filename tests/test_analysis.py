@@ -25,7 +25,7 @@ def test_declared_python_that_contradicts_the_code_is_reported():
     analysis = analyze({"a.py": b"match x:\n    case 1:\n        pass\n", "pyproject.toml": pyproject})
     assert analysis.suggested_python == "3.10"
     conflict = [i for i in analysis.issues if "расходится" in i.title]
-    assert len(conflict) == 1 and conflict[0].level == "medium" and "<3.10" in conflict[0].detail
+    assert len(conflict) == 1 and conflict[0].level == "medium" and "\\<3\\.10" in conflict[0].detail
     removed = analyze({"a.py": b"import imp\n", "pyproject.toml": b'[project]\nrequires-python = ">=3.12"\n'})
     assert removed.suggested_python == "3.11" and any("расходится" in i.title for i in removed.issues)
 

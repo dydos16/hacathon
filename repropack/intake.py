@@ -4,6 +4,7 @@
 """
 
 import io
+import struct
 import unicodedata
 import zipfile
 import zlib
@@ -12,6 +13,14 @@ from pathlib import Path, PurePosixPath
 MAX_ARCHIVE_BYTES = 150 * 1024 * 1024  # = maxUploadSize в .streamlit/config.toml: проект вместе с примером данных
 MAX_UNPACKED_BYTES = 600 * 1024 * 1024  # в 4 раза больше архива (CSV сжимается в разы), но не zip-бомба
 MAX_FILES = 2000
+# Записи центрального каталога, включая служебные: каждая становится объектом в памяти ещё до фильтрации.
+# ponytail: потолок ~ десятки МБ памяти на запрос; при большем — потоковый разбор каталога
+MAX_ZIP_RECORDS = 50_000
+EOCD_SIGNATURE = b"PK\x05\x06"  # конец центрального каталога ZIP
+EOCD_SIZE = 22
+MAX_ZIP_COMMENT = 0xFFFF
+ENTRY_COUNT_OFFSET = 10  # число записей в конце каталога: 2 байта, смещение от сигнатуры
+ENTRY_COUNT = struct.Struct("<H")
 INVISIBLE_CHARS = set("\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 JUNK_PARTS = {
     "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", ".idea", ".vscode",
@@ -65,6 +74,27 @@ def _entry_name(info: zipfile.ZipInfo) -> str:
         return raw.decode("cp866")
 
 
+def _declared_record_count(data: bytes) -> int | None:
+    """Число записей из конца архива: проверяется до того, как zipfile создаст объект на каждую запись."""
+    start = data.rfind(EOCD_SIGNATURE, max(0, len(data) - EOCD_SIZE - MAX_ZIP_COMMENT))
+    if start < 0 or start + EOCD_SIZE > len(data):
+        return None
+    return ENTRY_COUNT.unpack_from(data, start + ENTRY_COUNT_OFFSET)[0]
+
+
+def _check_unique(paths: list[str]) -> None:
+    """Пути, совпадающие без учёта регистра, на macOS и Windows — один файл: лучше ошибка, чем тихая подмена."""
+    seen: dict[str, str] = {}
+    for path in paths:
+        key = path.casefold()
+        if key in seen:
+            if seen[key] == path:
+                raise IntakeError(f"В архиве несколько записей с именем «{path}»")
+            raise IntakeError(f"«{seen[key]}» и «{path}» отличаются только регистром — на macOS и Windows "
+                              "это один файл, оставьте один вариант")
+        seen[key] = path
+
+
 def _strip_common_root(files: dict[str, bytes]) -> dict[str, bytes]:
     """Архив «project/…» превращается в «…», чтобы пути были от корня проекта."""
     tops = {p.split("/", 1)[0] for p in files}
@@ -76,6 +106,10 @@ def _strip_common_root(files: dict[str, bytes]) -> dict[str, bytes]:
 def read_zip(data: bytes) -> dict[str, bytes]:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise IntakeError(f"Архив больше {MAX_ARCHIVE_BYTES // 1024 // 1024} МБ")
+    declared = _declared_record_count(data)
+    if declared is not None and declared > MAX_ZIP_RECORDS:
+        raise IntakeError(f"В архиве больше {MAX_ZIP_RECORDS} записей, включая служебные (.git, .venv): "
+                          "уберите их из архива")
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
@@ -88,6 +122,7 @@ def read_zip(data: bytes) -> dict[str, bytes]:
         raise IntakeError(f"В архиве больше {MAX_FILES} файлов")
     if sum(info.file_size for _, info in entries) > MAX_UNPACKED_BYTES:
         raise IntakeError("Распакованный архив слишком большой (возможна zip-бомба)")
+    _check_unique([path for path, _ in entries])
     files: dict[str, bytes] = {}
     budget = MAX_UNPACKED_BYTES
     for path, info in entries:
@@ -125,6 +160,7 @@ def _merge(files: dict[str, bytes], added: dict[str, bytes]) -> dict[str, bytes]
     clash = next((p for p, data in added.items() if files.get(p, data) != data), None)
     if clash:
         raise IntakeError(f"Файл «{clash}» загружен дважды с разным содержимым — оставьте один вариант")
+    _check_unique([*files, *(p for p in added if p not in files)])
     merged = {**files, **added}
     if len(merged) > MAX_FILES or sum(map(len, merged.values())) > MAX_UNPACKED_BYTES:
         raise IntakeError(f"Загрузка слишком большая: больше {MAX_FILES} файлов "
@@ -152,15 +188,21 @@ def read_upload(uploads: list[tuple[str, bytes]], keep_paths: bool = False) -> d
     return files
 
 
+def _stays_inside(file: Path, root: Path) -> bool:
+    """Ссылка из папки на файл вне неё (например, ~/.aws/credentials) — не часть проекта и не читается."""
+    return file.resolve().is_relative_to(root)
+
+
 def read_directory(root: Path) -> dict[str, bytes]:
     """Для CLI и демо-проектов: читает папку с теми же фильтрами и лимитами, что и архив.
 
     Лимиты проверяются по ходу чтения, чтобы случайно указанная огромная папка не попала в память целиком.
     """
     files, total = {}, 0
+    real_root = root.resolve()
     for file in sorted(root.rglob("*")):
         path = _safe_path(file.relative_to(root).as_posix())
-        if path is None or not file.is_file():
+        if path is None or not _stays_inside(file, real_root) or not file.is_file():
             continue
         files[path] = file.read_bytes()
         total += len(files[path])

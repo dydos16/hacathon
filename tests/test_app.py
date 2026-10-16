@@ -131,7 +131,7 @@ def test_each_issue_shows_where_it_is_and_what_to_do():
     labels = {e.label for e in app.expander}
     assert {":red[Критично: 5]", ":orange[Нужно решение: 6]", ":gray[К сведению: 6]"} <= labels
     shown = texts(app.markdown)
-    assert "**Абсолютный путь «/Users/ivan/lab/raw_2024.csv»** · `analysis.py:24`" in shown
+    assert "**Абсолютный путь «/Users/ivan/lab/raw\\_2024\\.csv»** · `analysis.py:24`" in shown
     assert "→ такой путь есть только на компьютере автора — замените на относительный" in shown
 
 

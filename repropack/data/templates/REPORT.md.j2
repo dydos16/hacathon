@@ -8,7 +8,7 @@
 
 | Модуль | Категория | Пакет PyPI | Версия | Откуда имя | Где используется |
 |---|---|---|---|---|---|
-{% for d in dependencies %}| `{{ d.module }}` | {{ categories[d.category] }} | {{ d.package or "—" }} | {{ (d.version or "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %}, **подтвердить вручную**{% endif %} | {{ d.locations[:3]|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
+{% for d in dependencies %}| `{{ d.module }}` | {{ categories[d.category] }} | {{ d.package or "—" }} | {{ (d.version or "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %}, **подтвердить вручную**{% endif %} | {{ d.locations[:3]|map("mdcode")|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
 {% endfor %}
 {% if environment %}## Версии установленной среды
 
@@ -21,7 +21,7 @@
 {% endif %}
 {% endif %}## Предупреждения
 
-{% for issue in issues %}- [{{ levels[issue.level] }}] **{{ issue.title }}**{% if issue.where %} (`{{ issue.where }}`){% endif %} — {{ issue.detail }}
+{% for issue in issues %}- [{{ levels[issue.level] }}] **{{ issue.title }}**{% if issue.where %} ({{ issue.where|mdcode }}){% endif %} — {{ issue.detail }}
 {% else %}- Нет.
 {% endfor %}
 ## Чек-лист проекта

@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 
 from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
                        parse_declared_checked)
+from .markdown import escape
 from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source, skipped_scan
 from .secrets import SecretHit, env_names, file_text, find_secrets, is_secret_file, redact
 
@@ -149,7 +150,7 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
     if low or high:
         lifted = max(chosen, low or chosen)
         chosen = max(min(lifted, high or lifted), required)  # синтаксис кода важнее объявленной автором границы
-        reasons.append(f"в проекте указано «{hint}»")
+        reasons.append(f"в проекте указано «{escape(hint)}»")
     removed = sorted((REMOVED_STDLIB[d.module][0], d.module) for d in deps
                      if d.category == "removed" and REMOVED_STDLIB[d.module][0] != PYTHON2)
     removed_note = ""
@@ -163,7 +164,7 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
                 else removed_note if low and chosen < low else "")
     if conflict:
         issues.append(Issue("medium", "Версия Python расходится с объявленной в проекте",
-                            f"в проекте указано «{hint}», но {conflict} — выбрана {_version(chosen)}. "
+                            f"в проекте указано «{escape(hint)}», но {conflict} — выбрана {_version(chosen)}. "
                             "Исправьте объявление или код"))
     reason = "; ".join(reasons) or "современная стабильная версия; особых требований в коде не найдено"
     return _version(chosen), reason, issues
@@ -260,7 +261,8 @@ def _finding_issues(scans: list[FileScan]) -> list[Issue]:
     for scan in scans:
         for f in scan.findings:
             level, title, detail = FINDING_ISSUES[f.code]
-            issues.append(Issue(level, title.format(detail=f.detail), detail.format(detail=f.detail),
+            text = escape(f.detail)  # строка из кода: её символы не должны стать Markdown-разметкой
+            issues.append(Issue(level, title.format(detail=text), detail.format(detail=text),
                                 scan.where(f.line)))
     return issues
 
@@ -380,7 +382,7 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     issues = python_issues + _finding_issues(scans) + _relative_import_issues(scans, files)
     issues += _unreadable_declared(unreadable)
     issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(files, secret_files, secrets)
-    issues += [Issue("high", f"Файл данных «{ref}» не найден",
+    issues += [Issue("high", f"Файл данных «{escape(ref)}» не найден",
                      "приложите пример данных или опишите в README, где его взять "
                      "(если это файл, который скрипт сам создаёт, — пропустите)", where)
                for ref, where in data_missing]

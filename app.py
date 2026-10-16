@@ -13,6 +13,7 @@ import streamlit as st
 from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze, is_auxiliary
 from repropack.classify import LOCAL_ENV, Dependency
 from repropack.intake import IntakeError, read_directory, read_upload
+from repropack.markdown import code, escape
 from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
                               default_requirements, packaged_dependencies, slugify)
 from repropack.scanner import FileScan
@@ -151,7 +152,7 @@ def package_summary(analysis: Analysis) -> str:
              ("Нет в загрузке", [ref for ref, _ in analysis.data_missing]),
              ("Исключены (файлы с секретами)", analysis.secret_files),
              ("Секреты заменены на `<REDACTED>`", sorted({h.path for h in analysis.secrets})))
-    return "  \n".join(f"**{label}:** {', '.join(f'`{p}`' for p in items)}" for label, items in facts if items)
+    return "  \n".join(f"**{label}:** {', '.join(code(p) for p in items)}" for label, items in facts if items)
 
 
 def local_env_summary(analysis: Analysis) -> str:
@@ -168,7 +169,7 @@ def show_summary(analysis: Analysis, options: PackOptions, package: bytes | None
     show_verdict(analysis)
     show_metrics(analysis, options.requirements)
     if package is None:
-        st.error(f"Пакет не собран: {error}")
+        st.error(f"Пакет не собран: {escape(error)}")
         return
     names, generated = unpack(package)
     with st.container(horizontal=True):
@@ -182,13 +183,13 @@ def show_summary(analysis: Analysis, options: PackOptions, package: bytes | None
     notes = ["У коллеги: распакуйте архив и запустите `sh verify.sh` (Windows: `verify.ps1`). Итог — в конце "
              "`verify_log.txt`, точные версии — в `requirements.lock.txt`."]
     if unconfirmed := [r.package for r in options.requirements if not r.confirmed]:
-        notes.insert(0, f"Не подтверждены: {', '.join(unconfirmed)} — попадут в requirements.txt с пометкой.")
+        notes.insert(0, f"Не подтверждены: {', '.join(map(escape, unconfirmed))} — попадут в requirements.txt с пометкой.")
     st.caption("  \n".join(notes))
 
 
 def issue_markdown(issue: Issue) -> str:
     """Что случилось и где — первой строкой, что сделать — второй."""
-    where = f" · `{issue.where}`" if issue.where else ""
+    where = f" · {code(issue.where)}" if issue.where else ""
     return f"- **{issue.title}**{where}  \n  → {issue.detail}"
 
 
@@ -285,7 +286,7 @@ def run_options(analysis: Analysis, name: str, project: str) -> tuple[str, str, 
     cols[3].caption(f"Имя архива: `{slugify(project_name)}-repro.zip`"
                     + ("" if project_name.isascii() else " — нелатинские буквы в имя файла не попадают"))
     if is_auxiliary(entry):  # то же правило, по которому такие файлы стоят в конце списка
-        st.warning(f"`{entry}` похож на тест или служебный файл — эксперимент обычно запускают другим скриптом.")
+        st.warning(f"{code(entry)} похож на тест или служебный файл — эксперимент обычно запускают другим скриптом.")
     notes = [f"Точка входа: {entry_reason(scan)}.",
              f"Python {analysis.suggested_python} предложен: {analysis.python_reason}."]
     if needs_args and not args:
@@ -323,7 +324,7 @@ def main() -> None:
     try:
         source = choose_source()
     except IntakeError as exc:
-        st.error(f"Не удалось принять загрузку: {exc}")
+        st.error(f"Не удалось принять загрузку: {escape(str(exc))}")
         return
     # На общем сервере (REPRO_PUBLIC=1) версии «из среды» — это пакеты и ОС сервера, их не показываем посетителям
     use_local_env = not os.environ.get("REPRO_PUBLIC") and st.checkbox(

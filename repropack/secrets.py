@@ -10,6 +10,8 @@ SECRET_FILE_NAMES = {".env", ".envrc", ".netrc", ".pgpass", ".pypirc", ".npmrc",
                      "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", "credentials.json",
                      "client_secret.json", "service_account.json", "secrets.toml"}
 SECRET_FILE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".p8", ".ppk", ".tfvars"}
+# Копия «id_rsa.bak» — тот же ключ: суффиксы резервных копий снимаются перед проверкой имени
+BACKUP_SUFFIXES = {".bak", ".old", ".orig"}
 # .env.example и подобные — шаблоны переменных для коллег: файл остаётся в пакете, но сканируется
 ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 TEXT_SUFFIXES = {".py", ".ipynb", ".txt", ".cfg", ".ini", ".toml", ".yml", ".yaml", ".json", ".md", ".sh",
@@ -32,7 +34,7 @@ PATTERNS = [
     # (user:password@, xxx:xxx@) — не секрет. Схема — с начала слова и не длиннее 30 символов (без ReDoS)
     ("пароль в адресе подключения", re.compile(
         r"(?<![\w+.-])[a-z][a-z0-9+.-]{0,30}://[^\s:/@'\"\[]*:(?!(?i:x+|\*+|pass|passwd|password|pwd|secret)@)"
-        r"([^\s:/@'\"{}$<>%]+)@")),
+        r"((?:(?!%\()[^\s:/@'\"{}$<>])+)@")),
     # pip: --index-url https://ТОКЕН@host — у частных индексов токен часто стоит вместо имени пользователя
     ("токен в адресе индекса пакетов", re.compile(
         r"(?i)(?:index-url|find-links)[ \t=]+[a-z][a-z0-9+.-]{0,30}://([^\s/@'\"]+)@")),
@@ -47,9 +49,10 @@ CONFIG_ASSIGNMENT = re.compile(
     r"(?im)^[ \t]*(?:export[ \t]+)?[\w./:@-]{0,80}?(?:api_?key|access_?key|private_?key|secret(?:_?key)?|token"
     r"|passw(?:or)?d|pwd)[ \t]*[:=][ \t]*(?![\"'<{$%])([^\s\"'#]{8,})")
 REDACTED = "<REDACTED>"
-MASK_REVEAL_FROM = 20
-# [ \t], а не \s: с re.M «\s*» перескакивает через переводы строк, и файл из пустых строк разбирается квадратично
-ENV_ASSIGNMENT = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=", re.M)
+MASK = "…"  # значение не показываем даже частично: часть пароля тоже секрет
+# [ \t], а не \s: с re.M «\s*» перескакивает через переводы строк, и файл из пустых строк разбирается квадратично.
+# «=» не должен быть частью base64-строки ключа: «ABC==» — не присваивание
+ENV_ASSIGNMENT = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(?!=)", re.M)
 PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 
 
@@ -61,8 +64,16 @@ class SecretHit:
     masked: str
 
 
+def _secret_name(path: str) -> str:
+    """Имя файла без регистра и без суффиксов копии: «Id_RSA.bak» — то же, что «id_rsa»."""
+    stem = PurePosixPath(PurePosixPath(path).name.lower())
+    while stem.suffix in BACKUP_SUFFIXES:
+        stem = stem.with_suffix("")
+    return stem.name
+
+
 def is_secret_file(path: str) -> bool:
-    name = PurePosixPath(path).name.lower()
+    name = _secret_name(path)
     if name.startswith(".env.") and name.endswith(ENV_TEMPLATE_SUFFIXES):
         return False
     return (name in SECRET_FILE_NAMES or name.startswith(".env.") or name.endswith(".env")
@@ -85,6 +96,7 @@ def env_names(path: str, text: str) -> list[str]:
     name = PurePosixPath(path).name.lower()
     if not (name.startswith(".env") or name.endswith(".env")):
         return []
+    text = PRIVATE_KEY_BLOCK.sub("", text)  # строки тела ключа — не переменные
     return list(dict.fromkeys(ENV_ASSIGNMENT.findall(text)))
 
 
@@ -96,11 +108,6 @@ def _is_text(path: str) -> bool:
 def _is_config(path: str) -> bool:
     name = PurePosixPath(path).name.lower()
     return name.startswith(".env") or PurePosixPath(name).suffix in CONFIG_SUFFIXES
-
-
-def _mask(value: str) -> str:
-    """Начало и конец — только у длинных значений: у короткого пароля 6 символов — это почти весь пароль."""
-    return f"{value[:4]}…{value[-2:]}" if len(value) >= MASK_REVEAL_FROM else "…"
 
 
 def _redact_match(match: re.Match) -> str:
@@ -122,7 +129,7 @@ def find_secrets(path: str, text: str) -> list[SecretHit]:
         for kind, pattern in _patterns(_is_config(path)):
             match = pattern.search(line)
             if match and match.group(match.lastindex or 0) != REDACTED:
-                hits.append(SecretHit(path, number, kind, _mask(match.group(match.lastindex or 0))))
+                hits.append(SecretHit(path, number, kind, MASK))
                 break
     return hits
 

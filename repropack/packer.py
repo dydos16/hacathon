@@ -15,10 +15,14 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from . import __version__
 from .analysis import Analysis, decode
 from .classify import LOCAL_ENV, PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
-from .secrets import env_names, file_text, find_secrets, redact_bytes
+from .markdown import code, escape
+from .secrets import env_names, file_text, find_secrets, redact, redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
+# Пользовательские строки в Markdown: имя проекта и файлы — экранируются, код в обратных кавычках — оборачивается
+TEMPLATES.filters["md"] = escape
+TEMPLATES.filters["mdcode"] = code
 CATEGORIES = {"stdlib": "стандартная библиотека", "removed": "удалён из Python", "local": "локальный модуль",
               "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором",
               "conda_only": "пакет conda (не для pip)"}
@@ -129,7 +133,8 @@ def requirements_text(reqs: tuple[Requirement, ...], created: str) -> str:
         if req.comment:
             notes.append(" ".join(req.comment.split()))
         line = f"{req.package}{spec}"
-        lines.append(f"{line:<32} # {'; '.join(notes)}" if notes else line)
+        row = f"{line:<32} # {'; '.join(notes)}" if notes else line
+        lines.append(row if req.confirmed else f"# {row}")  # имя без проверки не ставим: строка закомментирована
     return "\n".join(lines) + "\n"
 
 
@@ -191,15 +196,16 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
     system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs
               if normalize(r.package) in SYSTEM_PACKAGES]
     run_tail = shlex.join(parts)
-    run_log = f"-- Запуск: python {run_tail}"
+    # В README, журнале и repro.json аргументы показываем без секретов; сама команда (run_tail) — настоящая
+    run_log = redact(f"-- Запуск: python {run_tail}")
     return {
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
         "tree": _package_tree(analysis, options),
         "python_version": options.python_version, "python_reason": analysis.python_reason,
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
         "system_packages": system, "system_apt": " ".join(dict.fromkeys(" ".join(a for _, a in system).split())),
-        "run_tail": run_tail, "run_command": f"python {run_tail}", "cmd_json": json.dumps(["python", *parts]),
-        "run_command_ps": " ".join(["python", *map(ps_quote, parts)]),
+        "run_tail": run_tail, "run_command": redact(f"python {run_tail}"), "cmd_json": json.dumps(["python", *parts]),
+        "run_command_ps": redact(" ".join(["python", *map(ps_quote, parts)])),
         "run_tail_ps": " ".join(map(ps_quote, parts)),
         "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
