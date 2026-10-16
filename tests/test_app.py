@@ -1,6 +1,7 @@
 """E2E интерфейса: Streamlit AppTest проходит пользовательские сценарии — демо, загрузку файлов и ошибки."""
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -46,6 +47,15 @@ def texts(elements) -> str:
     return " | ".join(e.value for e in elements)
 
 
+def widget(elements, label: str):
+    return next(e for e in elements if e.label == label)
+
+
+NOTEBOOK = json.dumps({"cells": [{"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
+                                  "source": ["import numpy\n"]}],
+                       "metadata": {}, "nbformat": 4, "nbformat_minor": 5}).encode()
+
+
 @pytest.mark.parametrize("demo, critical, verdict", [
     ("numpy_pandas_script", "0", "Почти готово"), ("local_module_project", "0", "Явных препятствий нет"),
     ("messy_lab_project", "6", "Скорее всего, у коллеги не запустится")])
@@ -62,6 +72,101 @@ def test_start_screen_asks_for_upload():
     app = start()
     assert not app.exception
     assert "Загрузите файлы" in app.info[0].value
+
+
+def test_start_screen_says_what_to_upload_what_comes_out_and_that_code_is_not_run():
+    shown = texts(start().markdown)
+    assert "Что загрузить" in shown and "Что получите" in shown
+    assert "Код не запускается" in shown and "<REDACTED>" in shown
+
+
+def test_messy_demo_numbers_fit_in_one_row_of_metrics():
+    app = open_demo("messy_lab_project")
+    assert {m.label: m.value for m in app.metric} == {
+        "Файлов": "7", "Внешних пакетов": "12", "Критичных проблем": "6", "Нужно подтвердить": "4"}
+    assert any(e.label.startswith("Стандартная библиотека: 4 · локальные модули: 1") for e in app.expander)
+
+
+def test_each_issue_shows_where_it_is_and_what_to_do():
+    app = open_demo("messy_lab_project")
+    assert {"Критично: 6", "Нужно решение: 5", "К сведению: 6"} <= {e.label for e in app.expander}
+    shown = texts(app.markdown)
+    assert "**Абсолютный путь «/Users/ivan/lab/raw_2024.csv»** · `analysis.py:24`" in shown
+    assert "→ такой путь есть только на компьютере автора — замените на относительный" in shown
+
+
+def test_long_issue_list_scrolls_inside_its_group():
+    many_missing = "\n".join(f"open('missing_{i}.csv')" for i in range(12)).encode()
+    group = widget(upload(("many.py", many_missing)).expander, "Критично: 12")
+    assert group.children[0].proto.height_config.pixel_height > 0
+    short = widget(open_demo("messy_lab_project").expander, "Критично: 6")
+    assert not short.children[0].proto.height_config.pixel_height
+
+
+@pytest.mark.parametrize("demo, reason", [
+    ("numpy_pandas_script", 'в файле есть `if __name__ == "__main__"`'),
+    ("local_module_project", "так обычно называют главный скрипт")])
+def test_entry_point_choice_is_explained(demo, reason):
+    assert f"Точка входа: {reason}" in texts(open_demo(demo).caption)
+
+
+def test_entry_point_without_any_signs_is_flagged_as_a_guess():
+    app = upload(("alpha.py", b"print(1)\n"), ("beta.py", b"print(2)\n"))
+    assert "явных признаков нет" in texts(app.caption)
+
+
+def test_test_file_chosen_as_entry_point_gets_a_warning():
+    app = upload(("run_me.py", b"if __name__ == '__main__':\n    pass\n"),
+                 ("test_model.py", b"def test_x():\n    pass\n"))
+    assert "похож на тест" not in texts(app.warning)
+    widget(app.selectbox, "Точка входа").set_value("test_model.py").run()
+    assert "похож на тест или служебный файл" in texts(app.warning)
+
+
+def test_notebook_entry_point_takes_no_arguments():
+    app = upload(("exp.ipynb", NOTEBOOK))
+    assert widget(app.text_input, "Аргументы запуска").proto.disabled
+    assert "nbconvert" in texts(app.caption)
+    assert not widget(upload(("exp.py", b"print(1)\n")).text_input, "Аргументы запуска").proto.disabled
+
+
+def test_switching_project_does_not_carry_over_run_settings():
+    app = open_demo("numpy_pandas_script")
+    widget(app.text_input, "Аргументы запуска").set_value("--n 5").run()
+    widget(app.selectbox, "Python").set_value("3.12").run()
+    app.selectbox[0].set_value("local_module_project").run()
+    assert widget(app.text_input, "Аргументы запуска").value == ""
+    assert widget(app.selectbox, "Python").value == "3.11"
+    assert "--n 5" not in app.tabs[0].markdown[0].value
+
+
+def test_run_arguments_survive_switching_the_entry_point():
+    app = open_demo("messy_lab_project")
+    widget(app.text_input, "Аргументы запуска").set_value("--n 5").run()
+    widget(app.selectbox, "Точка входа").set_value("lab/filters.py").run()
+    assert widget(app.text_input, "Аргументы запуска").value == "--n 5"
+
+
+def test_archive_name_is_shown_and_cyrillic_project_name_is_explained():
+    assert "Имя архива: `numpy-pandas-script-repro.zip`" in texts(open_demo("numpy_pandas_script").caption)
+    app = upload(("эксперимент.py", b"print(1)\n"))
+    assert app.text_input[1].value == "эксперимент"
+    assert "Имя архива: `project-repro.zip` — нелатинские буквы в имя файла не попадают" in texts(app.caption)
+
+
+def test_requirements_and_report_can_be_downloaded_separately():
+    app = open_demo("numpy_pandas_script")
+    assert [b.proto.label for b in app.download_button] == ["⬇️ Скачать пакет (ZIP)", "requirements.txt",
+                                                            "REPORT.md"]
+
+
+def test_package_summary_shows_data_and_what_was_hidden():
+    shown = texts(open_demo("messy_lab_project").markdown)
+    assert "**Данные в пакете:** `config.yaml`" in shown
+    assert "**Нет в загрузке:** `results/spectra.xlsx`" in shown
+    assert "**Исключены (файлы с секретами):** `.env`" in shown
+    assert "**Секреты заменены на `<REDACTED>`:** `analysis.py`" in shown
+    assert "Исключены" not in texts(open_demo("numpy_pandas_script").markdown)
 
 
 def test_messy_project_shows_unconfirmed_packages_and_needs_arguments():
@@ -105,9 +210,10 @@ def test_broken_archive_is_rejected_with_a_message():
     assert not app.metric
 
 
-def test_project_without_runnable_files_is_explained():
-    app = upload(("__init__.py", b""))
-    assert "нет файлов .py/.ipynb для запуска" in texts(app.error)
+def test_project_with_only_service_files_is_explained():
+    app = upload(("__init__.py", b""), ("data.csv", b"a\n1\n"))
+    assert "только служебные файлы Python" in texts(app.error)
+    assert not app.metric
 
 
 def test_unclosed_quote_in_arguments_blocks_the_package():

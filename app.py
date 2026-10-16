@@ -3,15 +3,16 @@
 import hashlib
 import io
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pandas as pd
 import streamlit as st
 
-from repropack.analysis import Analysis, analyze
+from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze
 from repropack.intake import IntakeError, read_directory, read_upload
 from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
                               default_requirements, packaged_dependencies, slugify)
+from repropack.scanner import FileScan
 
 EXAMPLES = {
     "numpy_pandas_script": "Скрипт с numpy/pandas и CSV-данными",
@@ -20,7 +21,17 @@ EXAMPLES = {
 }
 EXAMPLES_DIR = Path(__file__).parent / "examples"
 PYTHON_VERSIONS = ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
-LEVEL_VIEW = {"high": (st.error, "Критично"), "medium": (st.warning, "Нужно решение"), "info": (st.info, "К сведению")}
+LEVEL_VIEW = {"high": ("🔴", "Критично"), "medium": ("🟡", "Нужно решение"), "info": ("🔵", "К сведению")}
+ISSUES_BEFORE_SCROLL = 8
+ISSUE_LIST_HEIGHT = 420  # px: длинный список прокручивается внутри своей группы
+START_SCREEN = (
+    ("📥 Что загрузить", "Файлы `.py` и `.ipynb` или ZIP всего проекта (до 20 МБ). Данные и `requirements.txt` "
+                        "можно приложить рядом."),
+    ("📦 Что получите", "ZIP: `requirements.txt` с пояснением к каждой строке, README с командами, Dockerfile, "
+                       "`verify.sh` / `verify.ps1` и отчёт о том, что определить не удалось."),
+    ("🔒 Код не запускается", "Только статический разбор (`ast`) в памяти, на диск ничего не сохраняется. "
+                             "Файлы с секретами исключаются, ключи в коде заменяются на `<REDACTED>`."),
+)
 EDITABLE = ["Включить", "Пакет PyPI", "Версия", "Подтверждено"]
 INFO_COLUMNS = ["Модуль", "Категория", "Откуда", "Варианты", "Комментарий", "Где"]
 # Ячейки проверяются тем же regex, что и при сборке: неверное значение не принимается ещё в таблице
@@ -72,16 +83,20 @@ def choose_source() -> tuple[dict[str, bytes], str] | None:
     return read_upload([(u.name, u.getvalue()) for u in uploads]), name
 
 
-def show_metrics(analysis: Analysis) -> None:
-    deps = analysis.dependencies
-    cols = st.columns(5)
-    cols[0].metric("Файлов", len(analysis.files))
-    cols[1].metric("Внешних пакетов", len(packaged_dependencies(analysis)))
-    builtin_local = f"{sum(d.category == 'stdlib' for d in deps)} / {sum(d.category == 'local' for d in deps)}"
-    cols[2].metric("Встроенные / локальные", builtin_local,
-                   help="Модули стандартной библиотеки / модули самого проекта")
-    cols[3].metric("Критичных проблем", sum(i.level == "high" for i in analysis.issues))
-    cols[4].metric("Нужно подтвердить", sum(d.needs_confirmation for d in deps))
+def show_start_screen() -> None:
+    for col, (title, text) in zip(st.columns(len(START_SCREEN)), START_SCREEN):
+        col.markdown(f"**{title}**  \n{text}")
+
+
+def show_metrics(analysis: Analysis, requirements: tuple[Requirement, ...]) -> None:
+    """Пакеты считаются по таблице: подтвердили или исключили строку — счётчики сразу пересчитаны."""
+    with st.container(horizontal=True):  # на узком экране метрики переносятся, а не встают в столбик по одной
+        st.metric("Файлов", len(analysis.files))
+        st.metric("Внешних пакетов", len(requirements), help="включённые строки таблицы раздела 2 — они попадут "
+                                                             "в requirements.txt")
+        st.metric("Критичных проблем", sum(i.level == "high" for i in analysis.issues))
+        st.metric("Нужно подтвердить", sum(not r.confirmed for r in requirements),
+                  help="пакеты без отметки «Подтверждено» в таблице раздела 2")
 
 
 def show_verdict(analysis: Analysis) -> None:
@@ -125,10 +140,12 @@ def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
         st.info("Внешних зависимостей не найдено — requirements.txt будет без пакетов.")
     edited = st.data_editor(rows, key=key, num_rows="dynamic", width="stretch", hide_index=True,
                             disabled=INFO_COLUMNS, column_config=EDITOR_COLUMNS)
-    with st.expander("Стандартная библиотека и локальные модули (в requirements не попадают)"):
+    builtin = [d for d in analysis.dependencies if d.category in ("stdlib", "local")]
+    stdlib = sum(d.category == "stdlib" for d in builtin)
+    with st.expander(f"Стандартная библиотека: {stdlib} · локальные модули: {len(builtin) - stdlib} "
+                     "— в requirements не попадают"):
         st.dataframe(pd.DataFrame([{"Модуль": d.module, "Категория": CATEGORIES[d.category],
-                                    "Где": ", ".join(d.locations[:3])}
-                                   for d in analysis.dependencies if d.category in ("stdlib", "local")]),
+                                    "Где": ", ".join(d.locations[:3])} for d in builtin]),
                      width="stretch", hide_index=True)
     return tuple(
         Requirement(_cell(row, "Пакет PyPI"), _cell(row, "Версия"),
@@ -139,34 +156,75 @@ def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
     )
 
 
+def issue_markdown(issue: Issue) -> str:
+    """Что случилось и где — первой строкой, что сделать — второй."""
+    where = f" · `{issue.where}`" if issue.where else ""
+    return f"- **{issue.title}**{where}  \n  → {issue.detail}"
+
+
 def show_issues(analysis: Analysis) -> None:
     st.subheader("3. Что мешает воспроизвести")
     if not analysis.issues:
         st.success("Проблем не найдено.")
-    for level, (render, label) in LEVEL_VIEW.items():
+    for level, (icon, label) in LEVEL_VIEW.items():
         issues = [i for i in analysis.issues if i.level == level]
         if not issues:
             continue
-        with st.expander(f"{label}: {len(issues)}", expanded=level != "info"):
-            for issue in issues:
-                where = f"  \n`{issue.where}`" if issue.where else ""
-                render(f"**{issue.title}** — {issue.detail}{where}")
+        height = ISSUE_LIST_HEIGHT if len(issues) > ISSUES_BEFORE_SCROLL else "content"
+        with st.expander(f"{label}: {len(issues)}", expanded=level != "info", icon=icon), st.container(height=height):
+            st.markdown("\n".join(map(issue_markdown, issues)))
 
 
-def run_options(analysis: Analysis, name: str) -> tuple[str, str, str, str]:
+def looks_auxiliary(path: str) -> bool:
+    """Тест, conftest или setup.py: эксперимент так обычно не запускают."""
+    parts = PurePosixPath(path).parts
+    return parts[-1].startswith("test") or parts[-1] in ("conftest.py", "setup.py") or "tests" in parts
+
+
+def entry_reason(scan: FileScan) -> str:
+    if scan.path.endswith(".ipynb"):
+        return "ноутбук выполнится целиком через `jupyter nbconvert --execute`, аргументы ему не передаются"
+    if scan.has_main_guard:
+        return 'в файле есть `if __name__ == "__main__"`'
+    if PurePosixPath(scan.path).name in ENTRY_NAMES:
+        return "так обычно называют главный скрипт"
+    return 'явных признаков нет (ни `if __name__ == "__main__"`, ни имени вроде `main.py`) — проверьте выбор'
+
+
+def run_options(analysis: Analysis, name: str, project: str) -> tuple[str, str, str, str]:
+    """Ключи виджетов привязаны к проекту: при смене точки входа ввод сохраняется, при смене проекта — сброс."""
     st.subheader("4. Как запускать")
     cols = st.columns([2, 1, 2, 2])
-    entry = cols[0].selectbox("Точка входа", analysis.entry_candidates,
-                              help="Первым предложен файл с `if __name__ == '__main__'`")
+    entry = cols[0].selectbox("Точка входа", analysis.entry_candidates, key=f"entry-{project}",
+                              help="Сначала файлы с `if __name__ == '__main__'` и типичными именами (main.py, run.py…)")
+    scan = next(s for s in analysis.scans if s.path == entry)
     versions = sorted({*PYTHON_VERSIONS, analysis.suggested_python}, key=lambda v: tuple(map(int, v.split("."))))
-    python = cols[1].selectbox("Python", versions, index=versions.index(analysis.suggested_python))
-    needs_args = any(f.code == "cli_args" for s in analysis.scans if s.path == entry for f in s.findings)
-    args = cols[2].text_input("Аргументы запуска", placeholder="--input data.csv" if needs_args else "")
-    project_name = cols[3].text_input("Название проекта", value=name)
-    st.caption(f"Python {analysis.suggested_python} предложен: {analysis.python_reason}.")
+    python = cols[1].selectbox("Python", versions, index=versions.index(analysis.suggested_python),
+                               key=f"python-{project}")
+    notebook = entry.endswith(".ipynb")
+    needs_args = not notebook and any(f.code == "cli_args" for f in scan.findings)
+    args = cols[2].text_input("Аргументы запуска", placeholder="--input data.csv" if needs_args else "",
+                              disabled=notebook, key=f"args-{project}")
+    project_name = cols[3].text_input("Название проекта", value=name, key=f"name-{project}").strip() or name
+    cols[3].caption(f"Имя архива: `{slugify(project_name)}-repro.zip`"
+                    + ("" if project_name.isascii() else " — нелатинские буквы в имя файла не попадают"))
+    if looks_auxiliary(entry):
+        st.warning(f"`{entry}` похож на тест или служебный файл — эксперимент обычно запускают другим скриптом.")
+    notes = [f"Точка входа: {entry_reason(scan)}.",
+             f"Python {analysis.suggested_python} предложен: {analysis.python_reason}."]
     if needs_args and not args:
-        st.caption("ℹ️ Точка входа читает аргументы командной строки — при необходимости укажите их.")
+        notes.append("ℹ️ Точка входа читает аргументы командной строки — при необходимости укажите их.")
+    st.caption("  \n".join(notes))
     return entry, python, args, project_name
+
+
+def package_summary(analysis: Analysis) -> str:
+    """Что из загрузки попадёт в архив, чего нет и что скрыто — без открытия REPORT.md."""
+    facts = (("Данные в пакете", analysis.data_found),
+             ("Нет в загрузке", [ref for ref, _ in analysis.data_missing]),
+             ("Исключены (файлы с секретами)", analysis.secret_files),
+             ("Секреты заменены на `<REDACTED>`", sorted({h.path for h in analysis.secrets})))
+    return "  \n".join(f"**{label}:** {', '.join(f'`{p}`' for p in items)}" for label, items in facts if items)
 
 
 def download_section(analysis: Analysis, options: PackOptions) -> None:
@@ -179,16 +237,24 @@ def download_section(analysis: Analysis, options: PackOptions) -> None:
     unconfirmed = [r.package for r in options.requirements if not r.confirmed]
     if unconfirmed:
         st.warning(f"Не подтверждены: {', '.join(unconfirmed)} — попадут в requirements.txt с пометкой.")
-    st.download_button("⬇️ Скачать пакет (ZIP)", package, file_name=f"{slugify(options.project_name)}-repro.zip",
-                       mime="application/zip", type="primary")
-    # Предпросмотр читается из готового архива — показано ровно то, что будет скачано
+    # Предпросмотр и отдельные файлы читаются из готового архива — показано ровно то, что будет скачано
     archive = zipfile.ZipFile(io.BytesIO(package))
     names = archive.namelist()
     root = names[0].split("/", 1)[0]
+    generated = {name: archive.read(f"{root}/{name}") for name in PREVIEW}
+    with st.container(horizontal=True):
+        st.download_button("⬇️ Скачать пакет (ZIP)", package, file_name=f"{root}.zip", mime="application/zip",
+                           type="primary")
+        st.download_button("requirements.txt", generated["requirements.txt"], file_name="requirements.txt",
+                           mime="text/plain", icon="📄")
+        st.download_button("REPORT.md", generated["REPORT.md"], file_name="REPORT.md", mime="text/markdown",
+                           icon="📄")
+    if summary := package_summary(analysis):
+        st.markdown(summary)
     st.caption(f"Файлов в архиве: {len(names)} · {len(package) / 1024:.0f} КБ")
     tabs = st.tabs([*PREVIEW, "Состав архива"])
     for tab, (name, language) in zip(tabs, PREVIEW.items()):
-        text = archive.read(f"{root}/{name}").decode("utf-8-sig")
+        text = generated[name].decode("utf-8-sig")
         with tab, st.container(height=PREVIEW_HEIGHT):
             if language == "markdown":
                 st.markdown(text)
@@ -203,9 +269,8 @@ def download_section(analysis: Analysis, options: PackOptions) -> None:
 def main() -> None:
     use_local_env = sidebar()
     st.title("📦 repro-packer")
-    st.markdown("**Повтори мой эксперимент:** превращает научный Python-скрипт в переносимый пакет — "
-                "requirements.txt, README с командами, Dockerfile, скрипт проверки и честный отчёт о том, "
-                "что определить не удалось.")
+    st.markdown("**Повтори мой эксперимент:** превращает научный Python-скрипт в пакет, который коллега "
+                "проверит одной командой, — с честным отчётом о том, что определить не удалось.")
     st.subheader("1. Проект")
     try:
         source = choose_source()
@@ -213,19 +278,23 @@ def main() -> None:
         st.error(f"Не удалось принять загрузку: {exc}")
         return
     if source is None:
+        show_start_screen()
         return
     files, name = source
     analysis = cached_analysis(files, use_local_env)
     if not analysis.entry_candidates:
-        st.error("В проекте нет файлов .py/.ipynb для запуска.")
+        st.error("Нечего запускать: в загрузке только служебные файлы Python (`__init__.py`, `__main__.py`…). "
+                 "Добавьте скрипт или ноутбук, который проводит эксперимент.")
         return
-    show_metrics(analysis)
+    metrics = st.container()  # заполняется после таблицы: счётчики учитывают правки в ней
     show_verdict(analysis)
     signature = hashlib.sha256(b"".join(p.encode() + d for p, d in sorted(files.items()))).hexdigest()[:12]
     requirements = dependency_editor(analysis, key=f"deps-{signature}-{use_local_env}")
+    with metrics:
+        show_metrics(analysis, requirements)
     show_issues(analysis)
-    entry, python, args, project_name = run_options(analysis, name)
-    download_section(analysis, PackOptions(project_name or name, entry, python, requirements, args))
+    entry, python, args, project_name = run_options(analysis, name, signature)
+    download_section(analysis, PackOptions(project_name, entry, python, requirements, args))
 
 
 main()

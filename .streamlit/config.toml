@@ -7,3 +7,11 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+# Синий акцент вместо красного по умолчанию: красный в интерфейсе означает только «критично».
+# Заданы обе темы — переключатель светлой/тёмной и системная тема продолжают работать.
+[theme.light]
+primaryColor = "#1c6fd1"
+
+[theme.dark]
+primaryColor = "#4a9eff"
