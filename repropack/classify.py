@@ -50,6 +50,7 @@ VERSION_SPEC = re.compile(rf"^\s*(?:(?:{_OPERATOR}\s*)?{_VERSION}\s*(?:,\s*{_OPE
 PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
 DECLARED_ONLY_NOTE = "объявлено, но import не найден (плагин, бэкенд или лишняя зависимость)"
 CONDA_ONLY_NOTE = "пакет conda без import в коде — в requirements.txt не включён"
+NOT_ON_PYPI = "не с PyPI"  # статус модуля, который из PyPI не поставить
 MAPPING_FILE = Path(__file__).parent / "data" / "module_to_package.json"
 
 
@@ -344,7 +345,7 @@ def _declared_choice(candidates: tuple[str, ...], declared: dict[str, Declared])
 def _resolve_package(module: str, declared: dict[str, Declared], use_local_env: bool) -> dict:
     mapping = load_mapping()
     if module in mapping["not_on_pypi"]:
-        return {"status": "не с PyPI", "needs_confirmation": True, "note": mapping["not_on_pypi"][module]}
+        return {"status": NOT_ON_PYPI, "needs_confirmation": True, "note": mapping["not_on_pypi"][module]}
     if variant := _declared_choice(tuple(mapping["alternatives"].get(module, ())), declared):
         return {"package": variant, "status": "объявлено в проекте"}  # opencv-python-headless вместо opencv-python
     if module in mapping["known"]:

@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import pandas as pd
 import streamlit as st
 
-from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze
+from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze, is_auxiliary
 from repropack.intake import IntakeError, read_directory, read_upload
 from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
                               default_requirements, packaged_dependencies, slugify)
@@ -175,15 +175,9 @@ def show_issues(analysis: Analysis) -> None:
             st.markdown("\n".join(map(issue_markdown, issues)))
 
 
-def looks_auxiliary(path: str) -> bool:
-    """Тест, conftest или setup.py: эксперимент так обычно не запускают."""
-    parts = PurePosixPath(path).parts
-    return parts[-1].startswith("test") or parts[-1] in ("conftest.py", "setup.py") or "tests" in parts
-
-
 def entry_reason(scan: FileScan) -> str:
     if scan.path.endswith(".ipynb"):
-        return "ноутбук выполнится целиком через `jupyter nbconvert --execute`, аргументы ему не передаются"
+        return "ноутбук выполнится целиком через `python -m nbconvert --execute`, аргументы ему не передаются"
     if scan.has_main_guard:
         return 'в файле есть `if __name__ == "__main__"`'
     if PurePosixPath(scan.path).name in ENTRY_NAMES:
@@ -208,7 +202,7 @@ def run_options(analysis: Analysis, name: str, project: str) -> tuple[str, str, 
     project_name = cols[3].text_input("Название проекта", value=name, key=f"name-{project}").strip() or name
     cols[3].caption(f"Имя архива: `{slugify(project_name)}-repro.zip`"
                     + ("" if project_name.isascii() else " — нелатинские буквы в имя файла не попадают"))
-    if looks_auxiliary(entry):
+    if is_auxiliary(entry):  # то же правило, по которому такие файлы стоят в конце списка
         st.warning(f"`{entry}` похож на тест или служебный файл — эксперимент обычно запускают другим скриптом.")
     notes = [f"Точка входа: {entry_reason(scan)}.",
              f"Python {analysis.suggested_python} предложен: {analysis.python_reason}."]

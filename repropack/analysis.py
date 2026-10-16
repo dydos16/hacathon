@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from .classify import (PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
+from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
                        parse_declared)
 from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source
 from .secrets import SecretHit, env_names, find_secrets, is_secret_file
@@ -59,14 +59,14 @@ def _scan_all(files: dict[str, bytes]) -> list[FileScan]:
     return scans
 
 
-def _is_auxiliary(path: str) -> bool:
+def is_auxiliary(path: str) -> bool:
     """Тесты, setup.py, conftest.py, документация, миграции — не то, что запускают для эксперимента."""
     return bool(AUXILIARY_PATH.search(path))
 
 
 def _imported_modules(scans: list[FileScan]) -> set[str]:
     """Что импортирует сам проект; импорты из тестов не в счёт — тесты импортируют и главный скрипт."""
-    return {ref.module for scan in scans if not _is_auxiliary(scan.path) for ref in scan.imports if ref.module}
+    return {ref.module for scan in scans if not is_auxiliary(scan.path) for ref in scan.imports if ref.module}
 
 
 def _is_imported(path: str, imported: set[str]) -> bool:
@@ -80,7 +80,7 @@ def _entry_candidates(scans: list[FileScan]) -> tuple[str, ...]:
 
     def rank(scan: FileScan) -> tuple:
         runs_itself = scan.has_main_guard or any(f.code == "cli_args" for f in scan.findings)
-        return (_is_auxiliary(scan.path), _is_imported(scan.path, imported), not runs_itself,
+        return (is_auxiliary(scan.path), _is_imported(scan.path, imported), not runs_itself,
                 PurePosixPath(scan.path).name not in ENTRY_NAMES, scan.path.count("/"),
                 scan.path.endswith(".ipynb"), scan.path)
     runnable = [s for s in scans if not PurePosixPath(s.path).name.startswith("__")]
@@ -214,7 +214,7 @@ FINDING_ISSUES = {
                         "np.random.default_rng(42) или random.seed(42)"),
     "cli_args": ("info", "Скрипт читает аргументы командной строки",
                  "укажите аргументы запуска — они попадут в README и verify.sh"),
-    "notebook_magic": ("info", "В ноутбуке есть !pip install",
+    "notebook_magic": ("info", "В ноутбуке ставятся пакеты (pip install)",
                        "пакеты «{detail}» учтены как объявленные зависимости"),
     "unseeded_split": ("medium", "train_test_split без random_state",
                        "разбиение на обучающую и тестовую выборки будет меняться от запуска к запуску — "
@@ -247,9 +247,14 @@ def _dependency_issues(deps: list[Dependency]) -> list[Issue]:
         if d.category == "removed":
             fix = f"замена с PyPI: {d.package}" if d.package else "перепишите код или используйте старый Python"
             issues.append(Issue("high", f"«{d.module}»: {d.note}", fix, where))
+        elif d.status == NOT_ON_PYPI:
+            issues.append(Issue("high", f"«{d.module}» не ставится из PyPI", d.note, where))
         elif d.needs_confirmation:
             detail = f"{d.note}. Варианты: {', '.join(d.candidates)}" if d.candidates else d.note
             issues.append(Issue("medium", f"Подтвердите пакет для «{d.module}»", detail, where))
+        elif d.category == "external" and d.note:  # версии в файлах автора расходятся
+            issues.append(Issue("medium", f"Версии «{d.package}» в файлах расходятся",
+                                f"{d.note} — выбрана {d.version}; оставьте одну версию", where))
         if "optional" in d.kinds and d.category == "external":
             issues.append(Issue("info", f"Необязательный импорт «{d.module}»",
                                 "стоит в try/except ImportError — код работает и без пакета", where))
@@ -346,7 +351,7 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
                      "приложите пример данных или опишите в README, где его взять "
                      "(если это файл, который скрипт сам создаёт, — пропустите)", where)
                for ref, where in data_missing]
-    if sum(s.has_main_guard and not _is_auxiliary(s.path) for s in scans) > 1:
+    if sum(s.has_main_guard and not is_auxiliary(s.path) for s in scans) > 1:
         issues.append(Issue("info", "Несколько точек входа", "выберите, какой файл запускать"))
     issues += [Issue("info", f"Нет: {name}", "не обязательно, но помогает повторить эксперимент")
                for name, present in hygiene if not present]

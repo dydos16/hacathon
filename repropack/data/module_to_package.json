@@ -10,7 +10,7 @@
     "django": "Django", "streamlit": "streamlit", "jinja2": "Jinja2", "click": "click", "typer": "typer",
     "rich": "rich", "pydantic": "pydantic", "sqlalchemy": "SQLAlchemy", "psycopg2": "psycopg2-binary",
     "pymysql": "PyMySQL", "torch": "torch", "torchvision": "torchvision", "torchaudio": "torchaudio",
-    "tensorflow": "tensorflow", "keras": "keras", "jax": "jax", "xgboost": "xgboost",
+    "tensorflow": "tensorflow", "tensorboard": "tensorboard", "keras": "keras", "jax": "jax", "xgboost": "xgboost",
     "lightgbm": "lightgbm", "catboost": "catboost", "transformers": "transformers",
     "datasets": "datasets", "tokenizers": "tokenizers", "nltk": "nltk", "spacy": "spacy",
     "gensim": "gensim", "librosa": "librosa", "soundfile": "soundfile", "imageio": "imageio",

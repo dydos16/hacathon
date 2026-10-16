@@ -72,3 +72,24 @@ def test_excluded_secret_file_asks_for_a_decision_and_names_the_variables():
     assert {i.level for i in issues.values()} == {"medium"}  # исключить — верно; исправлять автору нечего
     assert "DB_PASSWORD, API_TOKEN" in issues[".env"].detail and ".env.example" in issues[".env"].detail
     assert "hunter2" not in issues[".env"].detail and "отдельно" in issues["keys/server.pem"].detail
+
+
+def test_package_with_different_versions_in_two_files_is_a_decision_for_the_author():
+    analysis = analyze({"a.py": b"import numpy\n", "requirements.txt": b"numpy==1.26.4\n",
+                        "sub/requirements.txt": b"numpy==1.24.0\n"})
+    conflict = [i for i in analysis.issues if i.title == "Версии «numpy» в файлах расходятся"]
+    assert [i.level for i in conflict] == ["medium"]
+    assert "==1.26.4 (requirements.txt)" in conflict[0].detail and "==1.24.0" in conflict[0].detail
+
+
+def test_module_that_pypi_cannot_provide_is_critical_with_its_own_title():
+    analysis = analyze({"a.py": b"from google.colab import drive\n"})
+    issue = next(i for i in analysis.issues if "google.colab" in i.title)
+    assert (issue.level, issue.title) == ("high", "«google.colab» не ставится из PyPI")
+    assert "Colab" in issue.detail
+
+
+def test_notebook_extension_tensorboard_is_a_known_package():
+    nb = b'{"cells": [{"cell_type": "code", "source": "%load_ext tensorboard\\n"}]}'
+    dep = next(d for d in analyze({"nb.ipynb": nb}).dependencies if d.module == "tensorboard")
+    assert (dep.package, dep.needs_confirmation) == ("tensorboard", False)
