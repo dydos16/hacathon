@@ -1,17 +1,21 @@
 """Сводный анализ проекта: зависимости + список предупреждений + кандидаты точки входа."""
 
+import posixpath
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from .classify import PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify, parse_declared
-from .scanner import DATA_EXTENSIONS, FileScan, scan_notebook, scan_source
+from .classify import (PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
+                       parse_declared)
+from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source
 from .secrets import SecretHit, find_secrets, is_secret_file
 
 DEFAULT_PYTHON = (3, 11)
-NO_REQUIREMENT = (3, 6)
 ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "train.py")
 LEVEL_ORDER = {"high": 0, "medium": 1, "info": 2}
+UNRESOLVABLE_DATA = "*{}<>|%"  # шаблоны имён (glob, %-формат): конкретный файл по ним не найти
+PYTHON_CLAUSE = re.compile(r"(\^|~=|~|===|==|!=|<=|>=|<|>)?\s*(\d+)(?:\.(\d+))?(?:\.[\d*]+)*")
+CONDA_ONLY_SHOWN = 8
 
 
 @dataclass(frozen=True)
@@ -61,9 +65,18 @@ def _entry_candidates(scans: list[FileScan]) -> tuple[str, ...]:
     return tuple(s.path for s in sorted(runnable, key=rank))
 
 
-def _parse_version(text: str) -> tuple[int, int] | None:
-    match = re.search(r"(\d+)\.(\d+)", text)
-    return (int(match.group(1)), int(match.group(2))) if match else None
+def _python_range(hint: str) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
+    """Нижняя и верхняя (включительно) границы версии Python из «>=3.8,<3.11», «^3.10», «3.10.13»…"""
+    low = high = None
+    for operator, major, minor in PYTHON_CLAUSE.findall(hint):
+        version = (int(major), int(minor or 0))
+        if operator in ("", "==", "===", ">=", ">", "~=", "~", "^"):
+            low = max(low or version, version)
+        if (operator in ("", "==", "===", "~") and minor) or operator == "<=":
+            high = min(high or version, version)
+        elif operator == "<":
+            high = min(high or version, (version[0], version[1] - 1))
+    return low, high
 
 
 def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) -> tuple[str, str]:
@@ -72,10 +85,10 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
     required = max(syntax_min, stdlib_min)
     chosen = max(DEFAULT_PYTHON, required)
     reasons = [f"по коду нужен ≥ {required[0]}.{required[1]}"] if required > NO_REQUIREMENT else []
-    declared = _parse_version(hint)
-    if declared:
-        is_lower_bound = hint.strip().startswith((">", "^", "~"))
-        chosen = max(chosen, declared) if is_lower_bound else max(declared, required)
+    low, high = _python_range(hint)
+    if low or high:
+        lifted = max(chosen, low or chosen)
+        chosen = max(min(lifted, high or lifted), required)  # синтаксис кода важнее объявленной автором границы
         reasons.append(f"в проекте указано «{hint}»")
     removed = [REMOVED_STDLIB[d.module][0] for d in deps
                if d.category == "removed" and REMOVED_STDLIB[d.module][0] != PYTHON2]
@@ -88,24 +101,30 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
 
 
 def _resolve_data(ref: str, importer: str, files: dict[str, bytes]) -> str | None:
-    for base in (PurePosixPath(importer).parent, PurePosixPath(".")):
-        candidate = str(PurePosixPath(base, ref.replace("\\", "/")))
+    """Путь от папки скрипта или от корня проекта; иначе — файл с тем же «хвостом» пути в любой папке.
+
+    Так находятся пути, собранные через os.path.join(DATA_DIR, "x.csv") или Path(...) / "x.csv".
+    """
+    ref = ref.replace("\\", "/")
+    for base in (posixpath.dirname(importer), ""):
+        candidate = posixpath.normpath(posixpath.join(base, ref))
         if candidate in files:
             return candidate
-    return None
+    tail = "/" + "/".join(part for part in PurePosixPath(ref).parts if part not in ("..", ".", "/"))
+    return next((path for path in sorted(files) if f"/{path}".endswith(tail)), None)
 
 
 def _data_refs(scans: list[FileScan], files: dict[str, bytes]) -> tuple[list[str], list[tuple[str, str]]]:
     found, missing = set(), {}
     for scan in scans:
         for ref, line in scan.data_refs:
-            if any(ch in ref for ch in "*{}<>|"):
+            if any(ch in ref for ch in UNRESOLVABLE_DATA):
                 continue
             resolved = _resolve_data(ref, scan.path, files)
             if resolved:
                 found.add(resolved)
             else:
-                missing.setdefault(ref, f"{scan.path}:{line}")
+                missing.setdefault(ref, scan.where(line))
     return sorted(found), sorted(missing.items())
 
 
@@ -121,14 +140,18 @@ def _relative_import_issues(scans: list[FileScan], files: dict[str, bytes]) -> l
             target = str(PurePosixPath(base, *ref.module.split(".")))
             if f"{target}.py" not in files and not any(p.startswith(f"{target}/") for p in files):
                 issues.append(Issue("high", f"Относительный импорт «{'.' * ref.level}{ref.module}» не найден",
-                                    "модуля нет в загруженных файлах — добавьте его в архив",
-                                    f"{scan.path}:{ref.line}"))
+                                    "модуля нет в загруженных файлах — добавьте его в архив", scan.where(ref.line)))
     return issues
 
 
 FINDING_ISSUES = {
     "syntax_error": ("high", "Файл не разбирается как Python 3",
                      "{detail}. Возможно, это код Python 2 или опечатка — импорты из файла не учтены"),
+    "too_complex": ("high", "Файл слишком сложный для разбора",
+                    "{detail} — импорты из файла не учтены, проверьте их вручную"),
+    "cell_syntax_error": ("medium", "Ячейка ноутбука не разбирается как Python",
+                          "{detail}: возможно, это синтаксис IPython (`x = !ls`, `obj?`) — импорты из ячейки "
+                          "не учтены, а запуск ноутбука через nbconvert может на ней остановиться"),
     "dynamic_unresolved": ("high", "Динамический импорт с вычисляемым именем",
                            "`importlib`/`__import__` получает выражение «{detail}» — какой модуль загрузится, "
                            "статически не определить. Добавьте зависимость вручную"),
@@ -151,8 +174,8 @@ def _finding_issues(scans: list[FileScan]) -> list[Issue]:
     for scan in scans:
         for f in scan.findings:
             level, title, detail = FINDING_ISSUES[f.code]
-            where = f"{scan.path}:{f.line}" if f.line else scan.path
-            issues.append(Issue(level, title.format(detail=f.detail), detail.format(detail=f.detail), where))
+            issues.append(Issue(level, title.format(detail=f.detail), detail.format(detail=f.detail),
+                                scan.where(f.line)))
     return issues
 
 
@@ -177,23 +200,38 @@ def _dependency_issues(deps: list[Dependency]) -> list[Issue]:
         if d.category == "local" and d.note:
             issues.append(Issue("medium", f"Локальный «{d.module}» совпадает по имени со стандартным модулем",
                                 f"{d.note}; если нужен стандартный модуль — переименуйте файл", where))
-    unknown = sorted({d.package for d in deps if d.package and not d.version}, key=str.lower)
+    return issues
+
+
+def _summary_issues(deps: list[Dependency]) -> list[Issue]:
+    issues = []
+    unknown = sorted({d.package for d in deps if d.category in PACKAGED_CATEGORIES and d.package and not d.version},
+                     key=str.lower)
     if unknown:
         issues.append(Issue("medium", f"Версии неизвестны: {', '.join(unknown)}",
                             "по исходному коду версию не восстановить. Укажите версии вручную, разрешите чтение "
                             "локальной среды или зафиксируйте после проверки (verify.sh сохранит "
                             "requirements.lock.txt)"))
+    conda_only = [d for d in deps if d.category == "conda_only"]
+    if conda_only:
+        names = [d.package for d in conda_only]
+        more = len(names) - CONDA_ONLY_SHOWN
+        shown = ", ".join(names[:CONDA_ONLY_SHOWN]) + (f" и ещё {more}" if more > 0 else "")
+        issues.append(Issue("info", f"Пакеты conda без import в коде: {len(names)}",
+                            f"{shown} — в requirements.txt не включены: часто это системные библиотеки conda. "
+                            "Если какой-то нужен коду (плагин, бэкенд), добавьте его в таблицу вручную",
+                            conda_only[0].version_source))
     return issues
 
 
-def _hygiene(files: dict[str, bytes], data_found: list[str]) -> tuple[tuple[str, bool], ...]:
+def _hygiene(files: dict[str, bytes], data_found: list[str], has_declared: bool) -> tuple[tuple[str, bool], ...]:
     names = [PurePosixPath(p).name.lower() for p in files]
     return (
         ("README автора", any(n.startswith("readme") for n in names)),
         ("LICENSE", any(n.startswith(("license", "licence", "copying")) for n in names)),
         ("Пример входных данных", bool(data_found) or any(p.lower().endswith(DATA_EXTENSIONS) for p in files)),
         ("Тесты", any(n.startswith("test_") or "/tests/" in f"/{p}" for n, p in zip(names, files))),
-        ("Список зависимостей автора", bool(parse_declared(files)[0])),
+        ("Список зависимостей автора", has_declared),
     )
 
 
@@ -209,15 +247,16 @@ def _secret_issues(secret_files: tuple[str, ...], secrets: tuple[SecretHit, ...]
 def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     scans = _scan_all(files)
     deps = classify(scans, files, use_local_env)
-    python, python_reason = _suggest_python(scans, deps, parse_declared(files)[1])
+    declared, python_hint = parse_declared(files)
+    python, python_reason = _suggest_python(scans, deps, python_hint)
     secret_files = tuple(p for p in files if is_secret_file(p))
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
                     for hit in find_secrets(p, decode(data)))
     data_found, data_missing = _data_refs(scans, files)
-    hygiene = _hygiene(files, data_found)
+    hygiene = _hygiene(files, data_found, bool(declared))
 
-    issues = _finding_issues(scans) + _relative_import_issues(scans, files) + _dependency_issues(deps)
-    issues += _secret_issues(secret_files, secrets)
+    issues = _finding_issues(scans) + _relative_import_issues(scans, files)
+    issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(secret_files, secrets)
     issues += [Issue("high", f"Файл данных «{ref}» не найден",
                      "приложите пример данных или опишите в README, где его взять "
                      "(если это файл, который скрипт сам создаёт, — пропустите)", where)

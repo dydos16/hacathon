@@ -7,8 +7,10 @@ from pathlib import PurePosixPath
 SECRET_FILE_NAMES = {".env", ".netrc", ".pgpass", "id_rsa", "id_ed25519", "credentials.json",
                      "client_secret.json", "secrets.toml", ".pypirc"}
 SECRET_FILE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore"}
-TEXT_SUFFIXES = {".py", ".ipynb", ".txt", ".cfg", ".ini", ".toml", ".yml", ".yaml", ".json",
-                 ".md", ".sh", ".env", ""}
+# .env.example и подобные — шаблоны переменных для коллег: файл остаётся в пакете, но сканируется
+ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+TEXT_SUFFIXES = {".py", ".ipynb", ".txt", ".cfg", ".ini", ".toml", ".yml", ".yaml", ".json", ".md", ".sh",
+                 ".env", ".conf", ".properties", ".xml", ".r", ".sql", ".js", ""}
 PATTERNS = [
     ("приватный ключ", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("ключ AWS", re.compile(r"\b(AKIA[0-9A-Z]{16})\b")),
@@ -33,8 +35,15 @@ class SecretHit:
 
 def is_secret_file(path: str) -> bool:
     name = PurePosixPath(path).name
+    if name.startswith(".env.") and name.endswith(ENV_TEMPLATE_SUFFIXES):
+        return False
     return (name in SECRET_FILE_NAMES or name.startswith(".env.")
-            or PurePosixPath(path).suffix in SECRET_FILE_SUFFIXES)
+            or PurePosixPath(name).suffix.lower() in SECRET_FILE_SUFFIXES)
+
+
+def _is_text(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return name.startswith(".env") or PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES
 
 
 def _mask(value: str) -> str:
@@ -42,7 +51,7 @@ def _mask(value: str) -> str:
 
 
 def find_secrets(path: str, text: str) -> list[SecretHit]:
-    if PurePosixPath(path).suffix not in TEXT_SUFFIXES:
+    if not _is_text(path):
         return []
     hits = []
     for number, line in enumerate(text.splitlines(), start=1):
@@ -60,3 +69,15 @@ def redact(text: str) -> str:
     for _, pattern in PATTERNS:
         text = pattern.sub(lambda m: m.group(0).replace(m.group(m.lastindex or 0), "<REDACTED>"), text)
     return text
+
+
+def redact_bytes(data: bytes) -> bytes:
+    """redact() для файла целиком без смены кодировки.
+
+    Файл не в UTF-8 (например, cp1251) читается как latin-1: эта кодировка переводит байты в символы
+    один к одному, поэтому всё, кроме вымаранных значений, остаётся побайтно прежним.
+    """
+    try:
+        return redact(data.decode("utf-8")).encode("utf-8")
+    except UnicodeDecodeError:
+        return redact(data.decode("latin-1")).encode("latin-1")

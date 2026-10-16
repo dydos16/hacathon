@@ -5,6 +5,7 @@
 
 import io
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
@@ -16,6 +17,9 @@ JUNK_PARTS = {
 }
 JUNK_SUFFIXES = {".pyc", ".pyo"}
 JUNK_NAMES = {".DS_Store", "Thumbs.db"}
+ENCRYPTED_FLAG = 0x1
+# Что бросает zipfile на повреждённых данных, неподдерживаемом сжатии или пароле
+ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
 
 
 class IntakeError(ValueError):
@@ -24,6 +28,8 @@ class IntakeError(ValueError):
 
 def _safe_path(raw: str) -> str | None:
     """Нормализует путь из архива; None — служебный файл; IntakeError — попытка выйти из папки."""
+    if any(ord(ch) < 32 for ch in raw):
+        raise IntakeError(f"Управляющие символы в имени файла: {raw!r}")
     path = PurePosixPath(raw.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts or (path.parts and ":" in path.parts[0]):
         raise IntakeError(f"Небезопасный путь в архиве: {raw!r}")
@@ -58,8 +64,18 @@ def read_zip(data: bytes) -> dict[str, bytes]:
     for info in entries:
         path = _safe_path(info.filename)
         if path is not None:
-            files[path] = archive.read(info)
+            files[path] = _read_entry(archive, info)
     return _strip_common_root(files)
+
+
+def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    if info.flag_bits & ENCRYPTED_FLAG:
+        raise IntakeError("Архив защищён паролем — загрузите его без пароля")
+    try:
+        return archive.read(info)
+    except ZIP_READ_ERRORS as exc:
+        raise IntakeError(f"Не удалось распаковать {info.filename!r}: архив повреждён "
+                          "или сжат неподдерживаемым методом") from exc
 
 
 def read_upload(uploads: list[tuple[str, bytes]]) -> dict[str, bytes]:
@@ -78,13 +94,18 @@ def read_upload(uploads: list[tuple[str, bytes]]) -> dict[str, bytes]:
 
 
 def read_directory(root: Path) -> dict[str, bytes]:
-    """Для CLI и демо-проектов: читает папку с теми же фильтрами, что и архив."""
-    files = {}
+    """Для CLI и демо-проектов: читает папку с теми же фильтрами и лимитами, что и архив.
+
+    Лимиты проверяются по ходу чтения, чтобы случайно указанная огромная папка не попала в память целиком.
+    """
+    files, total = {}, 0
     for file in sorted(root.rglob("*")):
-        if file.is_file():
-            path = _safe_path(file.relative_to(root).as_posix())
-            if path is not None:
-                files[path] = file.read_bytes()
-    if len(files) > MAX_FILES or sum(map(len, files.values())) > MAX_UNPACKED_BYTES:
-        raise IntakeError("Папка слишком большая")
+        path = _safe_path(file.relative_to(root).as_posix())
+        if path is None or not file.is_file():
+            continue
+        files[path] = file.read_bytes()
+        total += len(files[path])
+        if len(files) > MAX_FILES or total > MAX_UNPACKED_BYTES:
+            raise IntakeError(f"Папка слишком большая: больше {MAX_FILES} файлов "
+                              f"или {MAX_UNPACKED_BYTES // 1024 // 1024} МБ")
     return files

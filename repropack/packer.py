@@ -12,20 +12,20 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import __version__
-from .analysis import Analysis, decode
-from .classify import Dependency, normalize
-from .secrets import redact
+from .analysis import Analysis
+from .classify import PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
+from .secrets import redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
 CATEGORIES = {"stdlib": "стандартная библиотека", "removed": "удалён из Python", "local": "локальный модуль",
-              "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором"}
+              "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором",
+              "conda_only": "пакет conda (не для pip)"}
 LEVELS = {"high": "критично", "medium": "нужно решение", "info": "к сведению"}
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?$")
-VERSION_SPEC = re.compile(r"^[A-Za-z0-9.*+!<>=~, -]*$")
+PYTHON_VERSION = re.compile(r"^\d+\.\d+$")
 VERSION_OPERATORS = ("==", ">=", "<=", "~=", "!=", ">", "<")
 NOTEBOOK_RUNNERS = ("nbconvert", "ipykernel")
-PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
 
 
 @dataclass(frozen=True)
@@ -157,6 +157,8 @@ def _manifest(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement,
 
 def render_package(analysis: Analysis, options: PackOptions, created: str | None = None) -> dict[str, str]:
     """Сгенерированные файлы пакета (без исходников) — для предпросмотра в интерфейсе и для ZIP."""
+    if not PYTHON_VERSION.match(options.python_version):
+        raise ValueError(f"Некорректная версия Python: {options.python_version!r} — нужна вида 3.11")
     created = created or datetime.now(timezone.utc).isoformat(timespec="seconds")
     reqs = _with_notebook_runners(options)
     ctx = _context(analysis, options, reqs, created)
@@ -169,7 +171,7 @@ def render_package(analysis: Analysis, options: PackOptions, created: str | None
 def _project_files(analysis: Analysis) -> dict[str, bytes]:
     """Исходники для пакета: без файлов-секретов, с замаскированными секретами в тексте."""
     with_secrets = {h.path for h in analysis.secrets}
-    return {path: redact(decode(data)).encode() if path in with_secrets else data
+    return {path: redact_bytes(data) if path in with_secrets else data
             for path, data in analysis.files.items() if path not in analysis.secret_files}
 
 

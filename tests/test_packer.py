@@ -1,6 +1,8 @@
 import io
 import json
+import runpy
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -9,16 +11,18 @@ import pytest
 from repropack.__main__ import main
 from repropack.analysis import analyze
 from repropack.intake import read_directory
-from repropack.packer import PackOptions, Requirement, build_zip, default_requirements, requirements_text
+from repropack.packer import (PackOptions, Requirement, build_zip, default_requirements, render_package,
+                              requirements_text)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
+FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
 
 
 def pack(name: str, **overrides) -> tuple[zipfile.ZipFile, str]:
     analysis = analyze(read_directory(EXAMPLES / name))
-    options = PackOptions(project_name=name, entry_point=analysis.entry_candidates[0],
-                          python_version=analysis.suggested_python,
-                          requirements=default_requirements(analysis), **overrides)
+    options = PackOptions(**{"project_name": name, "entry_point": analysis.entry_candidates[0],
+                             "python_version": analysis.suggested_python,
+                             "requirements": default_requirements(analysis), **overrides})
     return zipfile.ZipFile(io.BytesIO(build_zip(analysis, options))), f"{name.replace('_', '-')}-repro"
 
 
@@ -45,6 +49,13 @@ def test_secrets_are_excluded_and_redacted_in_package():
     assert b"demo-not-a-real-password" not in blob and b"sk-DEMO0000" not in blob
 
 
+def test_redacted_author_file_keeps_its_encoding():
+    source = f"# комментарий\nAPI_KEY = '{FAKE_KEY}'\n".encode("cp1251")
+    analysis = analyze({"main.py": source})
+    archive = zipfile.ZipFile(io.BytesIO(build_zip(analysis, PackOptions("p", "main.py", "3.11", ()))))
+    assert archive.read("p-repro/project/main.py") == source.replace(FAKE_KEY.encode(), b"<REDACTED>")
+
+
 def test_manifest_lists_issues_and_unconfirmed_requirements():
     archive, root = pack("messy_lab_project")
     manifest = json.loads(archive.read(f"{root}/repro.json"))
@@ -55,12 +66,35 @@ def test_manifest_lists_issues_and_unconfirmed_requirements():
 
 def test_requirements_text_pins_marks_and_validates():
     text = requirements_text((Requirement("numpy", "1.26.4"), Requirement("pandas", ">=2.0"),
-                              Requirement("jwt", confirmed=False)), "now")
-    assert "numpy==1.26.4" in text and "pandas>=2.0" in text and "НЕ ПОДТВЕРЖДЕНО" in text
+                              Requirement("scipy", ">=1.2,<2"), Requirement("jwt", confirmed=False)), "now")
+    assert "numpy==1.26.4" in text and "pandas>=2.0" in text and "scipy>=1.2,<2" in text
+    assert "НЕ ПОДТВЕРЖДЕНО" in text
     with pytest.raises(ValueError):
         requirements_text((Requirement("numpy; rm -rf /"),), "now")
-    with pytest.raises(ValueError):
-        requirements_text((Requirement("numpy", "1.0\n--index-url http://evil"),), "now")
+
+
+@pytest.mark.parametrize("version", ["1.0\n--index-url http://evil", "1.0 --pre", "^1.2", "1.0; os_name=='nt'"])
+def test_versions_must_be_pip_specifiers(version):
+    with pytest.raises(ValueError, match="версия"):
+        requirements_text((Requirement("numpy", version),), "now")
+
+
+@pytest.mark.parametrize("files", [
+    {"pyproject.toml": b'[tool.poetry.dependencies]\nnumpy = "^1.26"\n'},
+    {"environment.yml": b"dependencies:\n  - numpy=1.26.4=py311h64a7726_0\n"},
+    {"requirements.txt": b"numpy==1.26.4 \\\n    --hash=sha256:abc\n"},
+    {"requirements.txt": b"numpy @ https://example.org/numpy.whl\ngit+https://github.com/x/y.git\n"},
+])
+def test_real_world_dependency_files_do_not_break_the_build(files):
+    analysis = analyze({"main.py": b"import numpy\n", **files})
+    rendered = render_package(analysis, PackOptions("p", "main.py", "3.11", default_requirements(analysis)))
+    assert [line.split("#")[0].strip() for line in rendered["requirements.txt"].splitlines()
+            if line.startswith("numpy")] in (["numpy>=1.26,<2"], ["numpy==1.26.4"], ["numpy"])
+
+
+def test_python_version_is_validated():
+    with pytest.raises(ValueError, match="Python"):
+        pack("local_module_project", python_version='3.11"; rm -rf ~; "')
 
 
 def test_run_args_reach_scripts_and_docker():
@@ -81,8 +115,44 @@ def test_run_args_are_not_expanded_in_verify_scripts(tmp_path: Path):
     assert "Log '-- Запуск:" in ps1
 
 
+def test_unclosed_quote_in_run_args_is_a_clear_error():
+    with pytest.raises(ValueError, match="кавычка"):
+        pack("local_module_project", run_args="'unclosed")
+
+
+def test_unknown_entry_point_is_rejected():
+    with pytest.raises(ValueError, match="Точка входа"):
+        pack("local_module_project", entry_point="missing.py")
+
+
+def test_notebook_entry_point_gets_runner_packages():
+    nb = json.dumps({"cells": [{"cell_type": "code", "source": "print(1)\n"}]}).encode()
+    analysis = analyze({"exp.ipynb": nb})
+    rendered = render_package(analysis, PackOptions("p", "exp.ipynb", "3.11", (Requirement("ipykernel"),)))
+    assert "nbconvert" in rendered["requirements.txt"] and rendered["requirements.txt"].count("ipykernel") == 1
+    assert "--execute exp.ipynb" in rendered["verify.sh"]
+
+
 def test_cli_builds_package(tmp_path: Path, capsys):
     output = tmp_path / "out.zip"
     assert main([str(EXAMPLES / "messy_lab_project"), "-o", str(output)]) == 0
     assert zipfile.is_zipfile(output)
     assert "[критично]" in capsys.readouterr().out
+
+
+def test_cli_reports_errors_with_exit_code(tmp_path: Path, capsys):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    assert main([str(tmp_path / "missing.zip")]) == 1
+    assert main([str(tmp_path / "pkg")]) == 1
+    assert main([str(EXAMPLES / "local_module_project"), "--entry", "nope.py", "-o", str(tmp_path / "o.zip")]) == 1
+    assert capsys.readouterr().err.count("Ошибка") == 3
+
+
+@pytest.mark.filterwarnings("ignore:.*found in sys.modules:RuntimeWarning")
+def test_python_dash_m_runs_the_cli(tmp_path: Path, monkeypatch):
+    output = tmp_path / "o.zip"
+    monkeypatch.setattr(sys, "argv", ["repropack", str(EXAMPLES / "local_module_project"), "-o", str(output)])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("repropack", run_name="__main__")
+    assert exit_info.value.code == 0 and output.exists()
