@@ -71,8 +71,7 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
     stdlib_min = max((STDLIB_ADDED[d.module] for d in deps if d.module in STDLIB_ADDED), default=NO_REQUIREMENT)
     required = max(syntax_min, stdlib_min)
     chosen = max(DEFAULT_PYTHON, required)
-    reasons = [f"по коду нужен ≥ {required[0]}.{required[1]}" if required > NO_REQUIREMENT
-               else "современная стабильная версия; особых требований в коде не найдено"]
+    reasons = [f"по коду нужен ≥ {required[0]}.{required[1]}"] if required > NO_REQUIREMENT else []
     declared = _parse_version(hint)
     if declared:
         is_lower_bound = hint.strip().startswith((">", "^", "~"))
@@ -84,7 +83,8 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
         ceiling = min(removed)
         chosen = min(chosen, (ceiling[0], ceiling[1] - 1))
         reasons.append(f"используются модули, удалённые в {ceiling[0]}.{ceiling[1]}")
-    return f"{chosen[0]}.{chosen[1]}", "; ".join(reasons)
+    reason = "; ".join(reasons) or "современная стабильная версия; особых требований в коде не найдено"
+    return f"{chosen[0]}.{chosen[1]}", reason
 
 
 def _resolve_data(ref: str, importer: str, files: dict[str, bytes]) -> str | None:
@@ -130,7 +130,7 @@ FINDING_ISSUES = {
     "syntax_error": ("high", "Файл не разбирается как Python 3",
                      "{detail}. Возможно, это код Python 2 или опечатка — импорты из файла не учтены"),
     "dynamic_unresolved": ("high", "Динамический импорт с вычисляемым именем",
-                           "importlib/__import__ получает выражение «{detail}» — какой модуль загрузится, "
+                           "`importlib`/`__import__` получает выражение «{detail}» — какой модуль загрузится, "
                            "статически не определить. Добавьте зависимость вручную"),
     "dynamic_import": ("medium", "Динамический импорт «{detail}»",
                        "модуль загружается через importlib — учтён в зависимостях, но проверьте"),

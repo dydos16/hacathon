@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -66,6 +67,18 @@ def test_run_args_reach_scripts_and_docker():
     archive, root = pack("messy_lab_project", run_args="baseline --verbose")
     assert "analysis.py baseline --verbose" in archive.read(f"{root}/verify.sh").decode()
     assert '["python", "analysis.py", "baseline", "--verbose"]' in archive.read(f"{root}/Dockerfile").decode()
+
+
+def test_run_args_are_not_expanded_in_verify_scripts(tmp_path: Path):
+    archive, root = pack("messy_lab_project", run_args="'$(touch pwned)' \"it's\" ‘x’")
+    sh_log = next(line for line in archive.read(f"{root}/verify.sh").decode().splitlines()
+                  if line.startswith("log ") and "Запуск" in line)
+    result = subprocess.run(["sh", "-c", f'log() {{ printf "%s" "$1"; }}; {sh_log}'],
+                            cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert "$(touch pwned)" in result.stdout and not (tmp_path / "pwned").exists()
+    ps1 = archive.read(f"{root}/verify.ps1").decode()
+    assert "& $VPy 'analysis.py' '$(touch pwned)' 'it''s' '‘‘x’’'" in ps1
+    assert "Log '-- Запуск:" in ps1
 
 
 def test_cli_builds_package(tmp_path: Path, capsys):

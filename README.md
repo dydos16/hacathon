@@ -80,7 +80,7 @@ messy-lab-project-repro/
 ## Как мы проверяли корректность
 
 ```bash
-pytest                                                  # 46 тестов, ~4 с, покрытие ≈ 94 %
+pytest                                                  # 47 тестов, ~4 с, покрытие ≈ 94 %
 REPRO_NETWORK_TESTS=1 pytest tests/test_clean_venv.py   # + реальная установка numpy/pandas из PyPI
 ```
 

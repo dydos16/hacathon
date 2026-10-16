@@ -61,6 +61,7 @@ def test_removed_stdlib_module_caps_python_version():
     dep = analysis.dependencies[0]
     assert (dep.category, dep.package) == ("removed", "setuptools")
     assert analysis.suggested_python == "3.11"
+    assert analysis.python_reason == "используются модули, удалённые в 3.12"
 
 
 def test_messy_project_reports_every_reproducibility_hazard():

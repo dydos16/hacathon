@@ -114,6 +114,11 @@ def run_parts(entry_point: str, run_args: str) -> list[str]:
         raise ValueError(f"Аргументы запуска не разобрать (незакрытая кавычка?): {run_args!r}") from exc
 
 
+def ps_quote(text: str) -> str:
+    """Литерал PowerShell в одинарных кавычках: $(...) не раскрывается; ' и типографские ‘’‚‛ удваиваются."""
+    return "'" + re.sub("['‘’‚‛]", lambda m: m.group() * 2, text) + "'"
+
+
 def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
 
@@ -121,11 +126,14 @@ def slugify(name: str) -> str:
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
     run_tail = shlex.join(parts)
+    run_log = f"-- Запуск: python {run_tail}"
     return {
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
         "python_version": options.python_version, "python_reason": analysis.python_reason,
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
         "run_tail": run_tail, "run_command": f"python {run_tail}", "cmd_json": json.dumps(["python", *parts]),
+        "run_tail_ps": " ".join(map(ps_quote, parts)),
+        "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
         "excluded": analysis.secret_files, "redacted": bool(analysis.secrets),
         "key_issues": [i for i in analysis.issues if i.level != "info"], "issues": analysis.issues,
