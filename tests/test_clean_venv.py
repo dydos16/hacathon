@@ -77,11 +77,13 @@ def test_numpy_pandas_project_runs_in_clean_venv(tmp_path: Path):
 @needs_network
 @pytest.mark.network
 def test_messy_project_fails_honestly_with_the_reason_in_the_log(tmp_path: Path):
-    """Шаг 9 демо: воспроизвести нельзя — скрипт не зависает и не молчит, а называет причину."""
+    """Шаг 9 демо: воспроизвести нельзя — скрипт не зависает и не молчит, а называет причину.
+    Неподтверждённые пакеты закомментированы в requirements.txt, поэтому установка проходит, а запуск падает
+    на импорте пакета, которого в окружении нет."""
     result, package, log = run_verify(read_directory(EXAMPLES / "messy_lab_project"), tmp_path)
-    assert result.returncode == 2, log
-    assert "РЕЗУЛЬТАТ: ОШИБКА установки зависимостей" in log
-    assert "labtools" in log.lower()  # pip называет пакет, которого нет на PyPI
+    assert result.returncode == 1, log
+    assert "РЕЗУЛЬТАТ: ОШИБКА запуска" in log
+    assert "ModuleNotFoundError" in log
     assert not (package / "project" / "executed.ipynb").exists()
 
 
