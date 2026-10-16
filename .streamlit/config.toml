@@ -8,19 +8,24 @@ toolbarMode = "minimal"
 [browser]
 gatherUsageStats = false
 
-# Светлая тема: на проекторе тёмная выцветает. Один акцент — тёмно-синий; красный в интерфейсе
-# означает только «критично». Шрифты — встроенные в Streamlit (с кириллицей, работают без интернета).
+# Светлая тема «научный журнал»: на проекторе тёмная выцветает. Бумажный фон, чернильный текст, один акцент —
+# петроль (#135f78, контраст 7:1 на белом); красный в интерфейсе означает только «критично».
+# Шрифты — встроенные в Streamlit (с кириллицей, работают без интернета): заголовки с засечками, текст без.
+# Анимации, карточки и иллюстрация первого экрана — в ui/style.css и ui/hero.svg.
 [theme]
 base = "light"
-primaryColor = "#1f4f8f"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f3f5f8"
-textColor = "#1b2230"
-linkColor = "#1f4f8f"
-borderColor = "#d8dde5"
+primaryColor = "#135f78"
+backgroundColor = "#fbfaf6"
+secondaryBackgroundColor = "#f3f0e8"
+textColor = "#1d2330"
+linkColor = "#135f78"
+borderColor = "#e4ded1"
 showWidgetBorder = true
-baseRadius = "small"
-dataframeHeaderBackgroundColor = "#f3f5f8"
+baseRadius = "medium"
+font = "sans-serif"
+headingFont = "serif"
+codeFont = "monospace"
+dataframeHeaderBackgroundColor = "#f3f0e8"
 # Код и пути — нейтральным цветом, а не зелёным по умолчанию: цвет в интерфейсе означает только уровень проблемы
-codeTextColor = "#1b2230"
-codeBackgroundColor = "#eef1f5"
+codeTextColor = "#1d2330"
+codeBackgroundColor = "#f1ede4"

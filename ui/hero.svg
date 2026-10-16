@@ -1,0 +1,80 @@
+<svg viewBox="0 70 420 180" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <style><![CDATA[
+    /* Анимация живёт внутри картинки: Streamlit вырезает встроенный SVG, а картинка-SVG анимируется */
+    .belt { stroke-dasharray: 6 8; animation: rp-belt 1.2s linear infinite; }
+    @keyframes rp-belt { to { stroke-dashoffset: -14; } }
+    .file { transform-box: fill-box; animation: rp-file 7s cubic-bezier(.2, .7, .2, 1) infinite; opacity: 0; }
+    .file-2 { animation-delay: .45s; }
+    .file-3 { animation-delay: .9s; }
+    @keyframes rp-file {
+      0% { opacity: 0; transform: translate(-40px, 0); }
+      8% { opacity: 1; }
+      34% { opacity: 1; transform: translate(160px, 0); }
+      44% { opacity: 1; transform: translate(232px, 30px) scale(.7); }
+      50%, 100% { opacity: 0; transform: translate(232px, 54px) scale(.6); }
+    }
+    .lid { transform-box: fill-box; transform-origin: 0% 100%; animation: rp-lid 7s cubic-bezier(.2, .7, .2, 1) infinite; }
+    @keyframes rp-lid {
+      0%, 52% { transform: rotate(-38deg); }
+      62%, 90% { transform: rotate(0); }
+      100% { transform: rotate(-38deg); }
+    }
+    .check-badge { transform-box: fill-box; transform-origin: center; animation: rp-badge 7s cubic-bezier(.2, .7, .2, 1) infinite; }
+    @keyframes rp-badge {
+      0%, 60% { opacity: 0; transform: scale(.4); }
+      68% { opacity: 1; transform: scale(1.08); }
+      72%, 90% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(.4); }
+    }
+    .check { stroke-dasharray: 30; stroke-dashoffset: 30; animation: rp-check 7s cubic-bezier(.2, .7, .2, 1) infinite; }
+    @keyframes rp-check { 0%, 66% { stroke-dashoffset: 30; } 76%, 100% { stroke-dashoffset: 0; } }
+    .scan { animation: rp-scan 7s ease-in-out infinite; }
+    @keyframes rp-scan {
+      0%, 6% { transform: translateX(0); opacity: 0; }
+      10% { opacity: .9; }
+      32% { transform: translateX(150px); opacity: .9; }
+      38%, 100% { transform: translateX(150px); opacity: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; }
+      .file { opacity: 0; } .check-badge { opacity: 1; } .check { stroke-dashoffset: 0; }
+    }
+  ]]></style>
+  <!-- Конвейер: файлы проекта → статический разбор (полоса «ast») → коробка-пакет → галочка проверки -->
+  <g fill="none" stroke="#e4ded1" stroke-width="2">
+    <circle cx="40" cy="194" r="7"/><circle cx="96" cy="194" r="7"/><circle cx="152" cy="194" r="7"/>
+    <circle cx="208" cy="194" r="7"/>
+  </g>
+  <line class="belt" x1="18" y1="184" x2="252" y2="184" stroke="#135f78" stroke-width="3" stroke-linecap="round"/>
+
+  <g class="file file-1">
+    <path d="M30 136h36l14 14v32H30z" fill="#ffffff" stroke="#135f78" stroke-width="2"/>
+    <path d="M66 136v14h14" fill="none" stroke="#135f78" stroke-width="2"/>
+    <text x="55" y="172" text-anchor="middle" font-family="'Source Code Pro', ui-monospace, monospace" font-size="12" font-weight="600" fill="#135f78">.py</text>
+  </g>
+  <g class="file file-2">
+    <path d="M30 136h36l14 14v32H30z" fill="#ffffff" stroke="#d4962a" stroke-width="2"/>
+    <path d="M66 136v14h14" fill="none" stroke="#d4962a" stroke-width="2"/>
+    <text x="55" y="172" text-anchor="middle" font-family="'Source Code Pro', ui-monospace, monospace" font-size="10" font-weight="600" fill="#a86f12">.ipynb</text>
+  </g>
+  <g class="file file-3">
+    <path d="M30 136h36l14 14v32H30z" fill="#ffffff" stroke="#5d6676" stroke-width="2"/>
+    <path d="M66 136v14h14" fill="none" stroke="#5d6676" stroke-width="2"/>
+    <text x="55" y="172" text-anchor="middle" font-family="'Source Code Pro', ui-monospace, monospace" font-size="12" font-weight="600" fill="#5d6676">.csv</text>
+  </g>
+
+  <g class="scan">
+    <line x1="44" y1="122" x2="44" y2="190" stroke="#d4962a" stroke-width="2" stroke-dasharray="3 4"/>
+    <text x="44" y="114" text-anchor="middle" font-family="'Source Code Pro', ui-monospace, monospace" font-size="11" font-weight="600" fill="#a86f12">ast</text>
+  </g>
+
+  <rect x="250" y="160" width="130" height="78" rx="7" fill="#f6efe0" stroke="#135f78" stroke-width="2.5"/>
+  <line x1="315" y1="160" x2="315" y2="238" stroke="#d4962a" stroke-width="3" opacity=".7"/>
+  <text x="315" y="207" text-anchor="middle" font-family="'Source Code Pro', ui-monospace, monospace" font-size="13" font-weight="600" fill="#1d2330">repro.zip</text>
+  <rect class="lid" x="250" y="150" width="130" height="10" rx="3" fill="#efe5d0" stroke="#135f78" stroke-width="2.5"/>
+
+  <g class="check-badge">
+    <circle cx="378" cy="148" r="19" fill="#135f78"/>
+    <path class="check" d="M369 148l6 6 12-13" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

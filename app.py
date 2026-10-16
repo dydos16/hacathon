@@ -1,5 +1,6 @@
 """Streamlit-интерфейс: проект → итог со скачиванием → проблемы → зависимости → запуск → содержимое пакета."""
 
+import base64
 import hashlib
 import io
 import zipfile
@@ -21,6 +22,7 @@ EXAMPLES = {
     "messy_lab_project": "«Сырой» проект: секреты, динамические импорты, пропавшие данные",
 }
 EXAMPLES_DIR = Path(__file__).parent / "examples"
+UI_DIR = Path(__file__).parent / "ui"  # оформление: style.css и иллюстрация первого экрана — правятся без кода
 SOURCES = ["Файлы или ZIP", "Папка проекта", "Демо-проект"]
 PYTHON_VERSIONS = ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
 # Уровень → заголовок группы и цвет текста (цвет вместо значков: красный — только для критичного)
@@ -35,6 +37,7 @@ START_SCREEN = (
     ("Код не запускается", "Только статический разбор (`ast`) в памяти, на диск ничего не сохраняется. "
                            "Файлы с секретами исключаются, ключи в коде заменяются на `<REDACTED>`."),
 )
+HERO_CHIPS = ("код не запускается", "verify.sh · verify.ps1", "Windows · Linux · macOS")
 # Видимые колонки таблицы; «Комментарий» скрыт, но нужен: он попадает в requirements.txt
 TABLE_COLUMNS = ["Включить", "Модуль", "Пакет PyPI", "Версия", "Подтверждено", "Примечание"]
 LOCKED_COLUMNS = ["Модуль", "Примечание", "Комментарий"]
@@ -79,9 +82,31 @@ def choose_source() -> tuple[dict[str, bytes], str] | None:
     return files, Path(uploads[0].name).stem if len(uploads) == 1 else "project"
 
 
+def apply_style() -> None:
+    """Стили и анимации сайта — в ui/style.css; тексты и порядок блоков задаёт только этот файл."""
+    st.html(f"<style>{(UI_DIR / 'style.css').read_text(encoding='utf-8')}</style>")
+
+
+def show_hero() -> None:
+    """Первый экран: название и суть слева, анимированная схема «файлы → разбор → пакет» справа."""
+    with st.container(key="hero"):
+        text, art = st.columns([3, 2], vertical_alignment="center")
+        with text:
+            st.html('<p class="rp-eyebrow">Обнинский хакатон 2026 · кейс 03</p>')
+            st.title("repro-packer")
+            st.markdown("Собирает из научного Python-проекта пакет, который коллега повторит у себя: "
+                        "`requirements.txt`, README, Dockerfile и скрипт проверки. Код проекта не запускается — "
+                        "только читается.")
+            st.html('<ul class="rp-chips">' + "".join(f"<li>{chip}</li>" for chip in HERO_CHIPS) + "</ul>")
+        # Картинкой, а не встроенным SVG: st.html вырезает <svg>, а анимация внутри <img> с SVG работает
+        art.html(f'<img class="rp-art" alt="" src="data:image/svg+xml;base64,'
+                 f'{base64.b64encode((UI_DIR / "hero.svg").read_bytes()).decode()}">')
+
+
 def show_start_screen() -> None:
-    for col, (title, text) in zip(st.columns(len(START_SCREEN)), START_SCREEN):
-        col.markdown(f"**{title}**  \n{text}")
+    with st.container(key="start"):
+        for col, (title, text) in zip(st.columns(len(START_SCREEN)), START_SCREEN):
+            col.markdown(f"**{title}**  \n{text}")
 
 
 def show_verdict(analysis: Analysis) -> None:
@@ -290,9 +315,8 @@ def build(analysis: Analysis, options: PackOptions) -> tuple[bytes | None, str]:
 
 
 def main() -> None:
-    st.title("repro-packer")
-    st.markdown("Собирает из научного Python-проекта пакет, который коллега повторит у себя: `requirements.txt`, "
-                "README, Dockerfile и скрипт проверки. Код проекта не запускается — только читается.")
+    apply_style()
+    show_hero()
     st.subheader("Проект")
     try:
         source = choose_source()
@@ -311,7 +335,7 @@ def main() -> None:
         st.error("Нечего запускать: в загрузке только служебные файлы Python (`__init__.py`, `__main__.py`…). "
                  "Добавьте скрипт или ноутбук, который проводит эксперимент.")
         return
-    summary = st.container(border=True)  # заполняется в конце: учитывает правки таблицы и настройки запуска
+    summary = st.container(border=True, key="summary")  # заполняется в конце: учитывает правки таблицы
     show_issues(analysis)
     signature = hashlib.sha256(b"".join(p.encode() + d for p, d in sorted(files.items()))).hexdigest()[:12]
     requirements = dependency_editor(analysis, key=f"deps-{signature}-{use_local_env}")

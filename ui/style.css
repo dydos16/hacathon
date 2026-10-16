@@ -1,0 +1,326 @@
+/* repro-packer — «научный журнал на миллиметровке».
+   Бумажный фон, чернила, один акцент (петроль); красный — только «критично» (цвета Streamlit для алертов).
+   Анимации короткие и только при появлении; при «уменьшить движение» в системе — выключены. */
+
+:root {
+  --rp-ink: #1d2330;
+  --rp-muted: #5d6676;
+  --rp-accent: #135f78;
+  --rp-accent-soft: #e4eff2;
+  --rp-amber: #d4962a;
+  --rp-paper: #fbfaf6;
+  --rp-card: #ffffff;
+  --rp-line: #e4ded1;
+  --rp-radius: 16px;
+  --rp-shadow: 0 1px 2px rgba(29, 35, 48, .05), 0 10px 28px -16px rgba(29, 35, 48, .22);
+  --rp-shadow-up: 0 2px 4px rgba(29, 35, 48, .06), 0 18px 36px -18px rgba(19, 95, 120, .35);
+  --rp-ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+/* ---------- Сетка и баланс: содержимое по центру, комфортная ширина строки ---------- */
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMainBlockContainer"] {
+  max-width: 1160px;
+  padding-top: 2.25rem;
+  padding-bottom: 5rem;
+  counter-reset: rp-section;
+}
+
+/* Появление блоков: мягкий подъём; на перерисовке Streamlit узлы переиспользуются, поэтому без мигания */
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"],
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > [data-testid="stLayoutWrapper"] {
+  animation: rp-rise .55s var(--rp-ease) both;
+}
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(2) { animation-delay: .06s; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(3) { animation-delay: .12s; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(4) { animation-delay: .18s; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(5) { animation-delay: .24s; }
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > :nth-child(n+6) { animation-delay: .3s; }
+
+@keyframes rp-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- Первый экран ---------- */
+.st-key-hero {
+  position: relative;
+  overflow: hidden;
+  padding: 2.4rem 2.6rem 2rem;
+  border: 1px solid var(--rp-line);
+  border-radius: 22px;
+  background:
+    radial-gradient(900px 320px at 100% -10%, rgba(19, 95, 120, .10), transparent 60%),
+    radial-gradient(500px 240px at -10% 120%, rgba(212, 150, 42, .10), transparent 60%),
+    var(--rp-card);
+  box-shadow: var(--rp-shadow);
+}
+/* Миллиметровка: тонкая сетка, к тексту растворяется, чтобы не мешать чтению */
+.st-key-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(19, 95, 120, .07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(19, 95, 120, .07) 1px, transparent 1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: linear-gradient(100deg, transparent 30%, #000 75%);
+  mask-image: linear-gradient(100deg, transparent 30%, #000 75%);
+}
+.st-key-hero h1 {
+  padding-top: .15rem;
+  font-size: clamp(2.5rem, 4.4vw, 3.6rem);
+  line-height: 1.02;
+  letter-spacing: -.035em;
+  padding-bottom: .35rem;
+}
+/* Акцентная черта под названием «прорисовывается» при загрузке */
+.st-key-hero h1 [data-heading-text] {
+  background: linear-gradient(var(--rp-amber), var(--rp-amber)) left 92% / 0 .14em no-repeat;
+  animation: rp-underline 1.1s .35s var(--rp-ease) forwards;
+}
+@keyframes rp-underline { to { background-size: 100% .14em; } }
+.st-key-hero [data-testid="stMarkdownContainer"] p {
+  font-size: 1.12rem;
+  line-height: 1.6;
+  color: var(--rp-muted);
+  max-width: 34rem;
+}
+
+.rp-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  margin: 0 0 .9rem;
+  padding: .3rem .75rem;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .8);
+  font: 600 .74rem/1.2 "Source Code Pro", ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--rp-accent);
+}
+.rp-eyebrow::before {
+  content: "";
+  width: .5rem;
+  height: .5rem;
+  border-radius: 50%;
+  background: var(--rp-amber);
+  box-shadow: 0 0 0 0 rgba(212, 150, 42, .55);
+  animation: rp-pulse 2.6s ease-out infinite;
+}
+@keyframes rp-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(212, 150, 42, .55); }
+  70%, 100% { box-shadow: 0 0 0 .5rem rgba(212, 150, 42, 0); }
+}
+
+.st-key-hero .rp-chips { display: flex; flex-wrap: wrap; gap: .5rem; margin: .4rem 0 0; padding: 0; list-style: none; }
+.st-key-hero .rp-chips li {
+  margin: 0;
+  padding: .32rem .7rem;
+  border-radius: 999px;
+  background: var(--rp-accent-soft);
+  color: var(--rp-accent);
+  font: 600 .78rem/1.2 "Source Code Pro", ui-monospace, monospace;
+  transition: transform .25s var(--rp-ease), background-color .25s;
+}
+.st-key-hero .rp-chips li:hover { transform: translateY(-2px); background: #d6e8ed; }
+
+/* Иллюстрация — картинка ui/hero.svg; её анимация описана внутри самого SVG */
+.st-key-hero .rp-art { display: block; width: 100%; max-width: 460px; margin-left: auto; }
+
+/* ---------- Заголовки разделов: засечки + номер из CSS-счётчика (в тексте заголовка номера нет) ---------- */
+[data-testid="stMainBlockContainer"] [data-testid="stHeading"] h3 {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  margin-top: 1.6rem;
+  letter-spacing: -.01em;
+}
+[data-testid="stMainBlockContainer"] [data-testid="stHeading"] h3::before {
+  counter-increment: rp-section;
+  content: counter(rp-section, decimal-leading-zero);
+  flex: none;
+  padding: .32rem .55rem;
+  border-radius: 8px;
+  background: var(--rp-accent-soft);
+  color: var(--rp-accent);
+  font: 600 .78rem/1 "Source Code Pro", ui-monospace, monospace;
+  letter-spacing: .04em;
+}
+[data-testid="stMainBlockContainer"] [data-testid="stHeading"] h3::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--rp-line), transparent);
+}
+
+/* ---------- Выбор источника: сегментированный переключатель вместо кружков ---------- */
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] {
+  display: inline-flex;
+  gap: .25rem;
+  padding: .3rem;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  background: #f3f0e8;
+}
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] [data-testid="stRadioOption"] {
+  margin: 0;
+  padding: .45rem 1.05rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color .25s var(--rp-ease), box-shadow .25s var(--rp-ease), color .25s;
+}
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] [data-testid="stRadioOption"] > div > div:first-child {
+  display: none;
+}
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] [data-testid="stRadioOption"]:hover { background: rgba(255, 255, 255, .7); }
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] [data-testid="stRadioOption"][data-selected="true"] {
+  background: var(--rp-card);
+  box-shadow: 0 1px 2px rgba(29, 35, 48, .08), 0 4px 12px -6px rgba(19, 95, 120, .4);
+}
+[data-testid="stRadioGroup"][aria-orientation="horizontal"] [data-testid="stRadioOption"][data-selected="true"] p {
+  color: var(--rp-accent);
+  font-weight: 600;
+}
+
+/* ---------- Зона загрузки ---------- */
+[data-testid="stFileUploaderDropzone"] {
+  padding: 1.6rem 1.4rem;
+  border: 1.5px dashed rgba(19, 95, 120, .45);
+  border-radius: var(--rp-radius);
+  background:
+    linear-gradient(rgba(255, 255, 255, .85), rgba(255, 255, 255, .85)),
+    repeating-linear-gradient(45deg, rgba(19, 95, 120, .05) 0 10px, transparent 10px 20px);
+  transition: border-color .25s, box-shadow .25s var(--rp-ease), transform .25s var(--rp-ease);
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+  border-color: var(--rp-accent);
+  box-shadow: 0 0 0 4px rgba(19, 95, 120, .10);
+  transform: translateY(-1px);
+}
+
+/* ---------- Карточки стартового экрана ---------- */
+.st-key-start [data-testid="stColumn"] {
+  position: relative;
+  padding: 1.3rem 1.4rem 1.2rem;
+  border: 1px solid var(--rp-line);
+  border-radius: var(--rp-radius);
+  background: var(--rp-card);
+  box-shadow: var(--rp-shadow);
+  transition: transform .3s var(--rp-ease), box-shadow .3s var(--rp-ease);
+  overflow: hidden;
+}
+.st-key-start [data-testid="stColumn"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 2.5rem;
+  height: 3px;
+  background: var(--rp-accent);
+  transition: width .45s var(--rp-ease);
+}
+.st-key-start [data-testid="stColumn"]:hover { transform: translateY(-4px); box-shadow: var(--rp-shadow-up); }
+.st-key-start [data-testid="stColumn"]:hover::before { width: 100%; }
+.st-key-start [data-testid="stColumn"] strong { font-size: 1.02rem; color: var(--rp-ink); }
+.st-key-start [data-testid="stColumn"] p { color: var(--rp-muted); line-height: 1.6; }
+
+/* ---------- Итог: приподнятая карточка с метриками и скачиванием ---------- */
+.st-key-summary {
+  border-radius: 20px !important;
+  border-color: var(--rp-line) !important;
+  background: var(--rp-card);
+  box-shadow: var(--rp-shadow);
+  padding: 1.4rem 1.5rem !important;
+}
+[data-testid="stMetric"] {
+  padding: .9rem 1.1rem;
+  border: 1px solid var(--rp-line);
+  border-radius: 14px;
+  background: var(--rp-paper);
+  transition: transform .25s var(--rp-ease), border-color .25s;
+}
+[data-testid="stMetric"]:hover { transform: translateY(-2px); border-color: rgba(19, 95, 120, .35); }
+[data-testid="stMetricLabel"] p {
+  font: 600 .74rem/1.2 "Source Code Pro", ui-monospace, monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--rp-muted);
+}
+[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+
+/* ---------- Кнопки: таблетки, подъём на наведении, блик у главной ---------- */
+[data-testid="stBaseButton-primary"],
+[data-testid="stBaseButton-secondary"] {
+  border-radius: 999px;
+  padding-inline: 1.15rem;
+  transition: transform .2s var(--rp-ease), box-shadow .2s var(--rp-ease), background-color .2s, border-color .2s;
+}
+[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stBaseButton-secondary"]:hover { transform: translateY(-2px); box-shadow: var(--rp-shadow-up); }
+[data-testid="stBaseButton-primary"]:active,
+[data-testid="stBaseButton-secondary"]:active { transform: translateY(0); }
+[data-testid="stBaseButton-primary"] {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #17708d, var(--rp-accent));
+  border-color: transparent;
+}
+[data-testid="stBaseButton-primary"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255, 255, 255, .35) 50%, transparent 70%);
+  transform: translateX(-120%);
+  transition: transform .7s var(--rp-ease);
+}
+[data-testid="stBaseButton-primary"]:hover::after { transform: translateX(120%); }
+
+/* ---------- Списки проблем, вкладки, таблицы ---------- */
+[data-testid="stExpander"] details {
+  border-color: var(--rp-line);
+  border-radius: 14px;
+  background: var(--rp-card);
+  transition: box-shadow .25s var(--rp-ease);
+}
+[data-testid="stExpander"] details:hover { box-shadow: var(--rp-shadow); }
+[data-testid="stExpander"] summary { border-radius: 14px; }
+[data-testid="stExpander"] summary:hover { background: #f6f3ec; }
+
+[data-testid="stTabs"] [role="tab"] { transition: color .2s; }
+/* Предпросмотр README/REPORT во вкладках — документ, а не страница: заголовки скромнее заголовков разделов */
+[data-testid="stTabs"] [data-testid="stMarkdownContainer"] h1 { font-size: 1.7rem; }
+[data-testid="stTabs"] [data-testid="stMarkdownContainer"] h2 { font-size: 1.3rem; }
+[data-testid="stTabs"] [role="tab"]:hover { color: var(--rp-accent); }
+
+[data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] { border-radius: 12px; overflow: hidden; }
+
+/* Индикатор разбора: бегущая полоса вместо голого текста */
+[data-testid="stSpinner"] { position: relative; padding-bottom: .6rem; }
+[data-testid="stSpinner"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 220px;
+  height: 3px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, transparent, var(--rp-accent), var(--rp-amber), transparent) 0 0 / 200% 100%;
+  animation: rp-bar 1.1s linear infinite;
+}
+@keyframes rp-bar { to { background-position: -200% 0; } }
+
+/* ---------- Узкий экран ---------- */
+@media (max-width: 760px) {
+  .st-key-hero { padding: 1.6rem 1.3rem 1.4rem; }
+  .st-key-hero .rp-art { margin: 1rem auto 0; max-width: 340px; }
+  [data-testid="stRadioGroup"][aria-orientation="horizontal"] { display: flex; flex-wrap: wrap; border-radius: 18px; }
+}
+
+/* ---------- Доступность: без движения, если пользователь так попросил ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .st-key-hero h1 [data-heading-text] { background-size: 100% .14em; }
+}
