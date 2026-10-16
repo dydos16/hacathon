@@ -27,7 +27,9 @@ if ($LASTEXITCODE -or -not (Test-Path $VPy)) { Log "ОШИБКА: не удал�
 Log "-- Установка зависимостей из requirements.txt"
 & $VPy -m pip install --disable-pip-version-check -r requirements.txt 2>&1 | ForEach-Object { Append "$_" }
 if ($LASTEXITCODE) { Log "РЕЗУЛЬТАТ: ОШИБКА установки зависимостей (подробности в $Log)"; exit 2 }
-& $VPy -m pip freeze | Set-Content requirements.lock.txt
+# Пустой вывод (у проекта нет внешних пакетов) Set-Content не превращает в файл — пишем сами, как verify.sh
+$Frozen = @(& $VPy -m pip freeze)
+[System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot "requirements.lock.txt"), [string[]]$Frozen, $Utf8)
 Log "-- Точные версии сохранены в requirements.lock.txt"
 
 Log {{ run_log_ps }}
