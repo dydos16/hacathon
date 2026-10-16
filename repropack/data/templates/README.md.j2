@@ -1,0 +1,71 @@
+# {{ project_name }} — пакет воспроизводимости
+
+Создан автоматически инструментом **repro-packer** {{ created }}.
+Исходный код автора лежит в папке `project/` без изменений{% if redacted %} (кроме замены секретов на `<REDACTED>`){% endif %}.
+Это **стартовый черновик**: он собран статическим разбором кода и требует проверки человеком — см. раздел «Что не определено».
+
+## Быстрая проверка одной командой
+
+```bash
+sh verify.sh            # Linux / macOS
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File verify.ps1   # Windows
+```
+
+Скрипт создаёт чистое окружение `.repro-venv`, ставит зависимости, сохраняет точные версии
+в `requirements.lock.txt`, запускает проект и пишет итог в `verify_log.txt`.
+
+## Требования
+
+- Python **{{ python_version }}** ({{ python_reason }})
+- Пакеты из `requirements.txt` ({{ requirements|length }} шт.){% if unknown_versions %}; версии не зафиксированы для: {{ unknown_versions|join(", ") }}{% endif %}
+
+## Установка вручную
+
+```bash
+python{{ python_version }} -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Запуск
+
+```bash
+cd project
+{{ run_command }}
+```
+{% if data_found %}
+## Входные данные (включены в пакет)
+
+{% for path in data_found %}- `project/{{ path }}`
+{% endfor %}{% endif %}{% if data_missing %}
+## Данные, которых нет в пакете
+
+Код ссылается на эти файлы, но их не было в загрузке. Без них запуск, скорее всего, упадёт:
+
+{% for ref, where in data_missing %}- `{{ ref }}` — {{ where }}
+{% endfor %}{% endif %}{% if excluded %}
+## Исключено из пакета
+
+{% for path in excluded %}- `{{ path }}` — похоже на файл с секретами
+{% endfor %}{% endif %}
+## Docker (альтернатива)
+
+```bash
+docker build -t {{ slug }} .
+docker run --rm {{ slug }}
+```
+
+## Что не определено
+
+{% for issue in key_issues %}- **{{ issue.title }}**{% if issue.where %} (`{{ issue.where }}`){% endif %} — {{ issue.detail }}
+{% else %}- Серьёзных неопределённостей не найдено, но версии всё равно стоит проверить через `verify.sh`.
+{% endfor %}
+Полный отчёт со всеми зависимостями и источниками — в `REPORT.md`, машиночитаемая версия — в `repro.json`.
+
+## Что не гарантируется
+
+- Побитово одинаковый результат на разных ОС, процессорах и версиях библиотек.
+- Точные версии пакетов: по исходному коду их восстановить нельзя, поэтому зафиксируйте их после первой успешной проверки (`requirements.lock.txt`).
+- Системные зависимости (компиляторы, CUDA, GDAL и т. п.) не определяются.

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Проверка пакета в чистом виртуальном окружении (создано repro-packer).
+# Запуск: sh verify.sh     Другой интерпретатор: PYTHON=python{{ python_version }} sh verify.sh
+cd "$(dirname "$0")" || exit 1
+PYTHON="${PYTHON:-python3}"
+LOG=verify_log.txt
+VPY=.repro-venv/bin/python
+log() { echo "$1" | tee -a "$LOG"; }
+
+: > "$LOG"
+log "== Проверка: $(date)"
+log "Ожидается Python {{ python_version }}, найден: $("$PYTHON" --version 2>&1)"
+rm -rf .repro-venv
+"$PYTHON" -m venv .repro-venv >> "$LOG" 2>&1 || { log "ОШИБКА: не удалось создать venv"; exit 1; }
+
+log "-- Установка зависимостей из requirements.txt"
+"$VPY" -m pip install --disable-pip-version-check -r requirements.txt >> "$LOG" 2>&1 \
+  || { log "РЕЗУЛЬТАТ: ОШИБКА установки зависимостей (подробности в $LOG)"; exit 2; }
+"$VPY" -m pip freeze > requirements.lock.txt
+log "-- Точные версии сохранены в requirements.lock.txt"
+
+log "-- Запуск: {{ run_command }}"
+cd project || exit 1
+"../$VPY" {{ run_tail }} > ../run_output.txt 2>&1
+code=$?
+cd ..
+tee -a "$LOG" < run_output.txt
+if [ "$code" -eq 0 ]; then
+  log "РЕЗУЛЬТАТ: OK (код выхода 0)"
+else
+  log "РЕЗУЛЬТАТ: ОШИБКА запуска (код выхода $code)"
+fi
+exit "$code"

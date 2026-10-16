@@ -1,0 +1,28 @@
+# Отчёт о неопределённостях — {{ project_name }}
+
+Создан repro-packer {{ created }}. Разбор статический: код проекта **не запускался**.
+
+Итого: {{ counts.high }} критичных, {{ counts.medium }} требуют решения, {{ counts.info }} к сведению.
+
+## Зависимости
+
+| Модуль | Категория | Пакет PyPI | Версия | Откуда имя | Где используется |
+|---|---|---|---|---|---|
+{% for d in dependencies %}| `{{ d.module }}` | {{ categories[d.category] }} | {{ d.package or "—" }} | {{ (d.version or "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %} ⚠{% endif %} | {{ d.locations[:3]|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
+{% endfor %}
+⚠ — соответствие модуля и пакета нужно подтвердить вручную.
+
+## Предупреждения
+
+{% for issue in issues %}- [{{ levels[issue.level] }}] **{{ issue.title }}**{% if issue.where %} (`{{ issue.where }}`){% endif %} — {{ issue.detail }}
+{% else %}- Нет.
+{% endfor %}
+## Чек-лист проекта
+
+{% for name, present in hygiene %}- [{{ "x" if present else " " }}] {{ name }}
+{% endfor %}
+## Как довести до полной воспроизводимости
+
+1. Запустите `sh verify.sh` (или `verify.ps1`) на чистой машине.
+2. Если всё прошло — замените `requirements.txt` на созданный `requirements.lock.txt`: в нём точные версии.
+3. Исправьте пункты «критично» из списка выше и пересоберите пакет.

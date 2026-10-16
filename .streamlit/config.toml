@@ -1,0 +1,9 @@
+[server]
+# Совпадает с лимитом repropack.intake.MAX_ARCHIVE_BYTES
+maxUploadSize = 20
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

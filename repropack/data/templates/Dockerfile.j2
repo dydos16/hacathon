@@ -1,0 +1,7 @@
+# Шаблон, созданный repro-packer. Проверьте версию Python и системные пакеты.
+FROM python:{{ python_version }}-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY project/ .
+CMD {{ cmd_json }}
