@@ -35,7 +35,12 @@ SYSTEM_PACKAGES = {
     "pyaudio": "portaudio19-dev gcc", "pygraphviz": "graphviz graphviz-dev gcc",
 }
 # Docker отправляет демону всю папку: окружение и логи verify.sh не нужны и весят сотни мегабайт
-DOCKERIGNORE = ".repro-venv/\nverify_log.txt\nrun_output.txt\n"
+# Docker копирует всю папку: окружение, логи и файлы с секретами в образ не нужны. Порядок важен: последнее правило побеждает
+DOCKERIGNORE = "\n".join([
+    ".repro-venv/", "verify_log.txt", "run_output.txt",
+    "**/.env*", "!**/.env.example", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.keystore",
+    "**/*.jks", "**/*.p8", "**/*.ppk", "**/*.tfvars", "**/.netrc", "**/.pypirc", "**/.npmrc",
+    "**/.aws/", "**/.ssh/", "**/.docker/", "**/.kube/", "**/credentials.json", "**/secrets.toml", ""])
 TEMPLATED = ("README.md", "REPORT.md", "Dockerfile", "verify.sh", "verify.ps1")
 # Корень пакета для дерева в README: файл → зачем он коллеге
 PACKAGE_FILES = {

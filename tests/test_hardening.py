@@ -63,3 +63,22 @@ def test_unpacked_size_is_counted_by_real_bytes_not_by_header():
     with pytest.raises(IntakeError, match="zip-бомба"):
         intake._read_limited(io.BytesIO(b"x" * 5000), 1000)
     assert intake._read_limited(io.BytesIO(b"x" * 500), 1000) == b"x" * 500
+
+
+@pytest.mark.parametrize("path", ["keys/server.jks", "deploy/prod.tfvars", "keys/signing.p8", "vault/key.ppk"])
+def test_keystores_and_infra_variables_are_secret_files(path):
+    """Пункт 5: эти файлы почти всегда содержат пароли и ключи и не должны уходить в пакет."""
+    from repropack.secrets import is_secret_file
+
+    assert is_secret_file(path), path
+
+
+def test_docker_context_leaves_secret_files_out_but_keeps_env_templates():
+    """Пункт 5: COPY project/ копирует всё из контекста сборки — секретные файлы туда попадать не должны."""
+    from repropack.packer import DOCKERIGNORE
+
+    lines = DOCKERIGNORE.splitlines()
+    for pattern in ("**/.env*", "**/*.pem", "**/*.key", "**/*.jks", "**/*.tfvars", "**/.aws/", "**/.ssh/", "**/.docker/"):
+        assert pattern in lines, pattern
+    assert "!**/.env.example" in lines
+    assert lines.index("!**/.env.example") > lines.index("**/.env*")  # в .dockerignore побеждает последнее правило

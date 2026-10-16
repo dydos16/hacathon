@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 SECRET_FILE_NAMES = {".env", ".envrc", ".netrc", ".pgpass", ".pypirc", ".npmrc", ".git-credentials", ".dockercfg",
                      "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", "credentials.json",
                      "client_secret.json", "service_account.json", "secrets.toml"}
-SECRET_FILE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore"}
+SECRET_FILE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".p8", ".ppk", ".tfvars"}
 # .env.example и подобные — шаблоны переменных для коллег: файл остаётся в пакете, но сканируется
 ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 TEXT_SUFFIXES = {".py", ".ipynb", ".txt", ".cfg", ".ini", ".toml", ".yml", ".yaml", ".json", ".md", ".sh",
