@@ -1,4 +1,6 @@
 import io
+import os
+import tomllib
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -198,3 +200,16 @@ def test_secret_files_are_recognized_regardless_of_case_and_variant():
     for path in (".ENV", "prod.env", ".envrc", ".aws/credentials", ".npmrc", ".git-credentials", "keys/ID_RSA"):
         assert is_secret_file(path), path
     assert not is_secret_file(".env.example") and not is_secret_file("environment.yml")
+
+
+def test_streamlit_upload_limit_matches_archive_limit_of_150_mb():
+    config = Path(__file__).parent.parent / ".streamlit" / "config.toml"
+    max_upload_mb = tomllib.loads(config.read_text(encoding="utf-8"))["server"]["maxUploadSize"]
+    assert max_upload_mb * 1024 * 1024 == intake.MAX_ARCHIVE_BYTES == 150 * 1024 * 1024
+    assert intake.MAX_UNPACKED_BYTES >= 4 * intake.MAX_ARCHIVE_BYTES  # данные в архиве сжимаются в разы
+
+
+def test_archive_bigger_than_the_old_20_mb_limit_is_accepted():
+    big = os.urandom(25 * 1024 * 1024)  # случайные байты не сжимаются: архив тоже ~25 МБ
+    files = read_upload([("project.zip", make_zip({"main.py": b"print(1)", "data/big.bin": big}))])
+    assert len(files["data/big.bin"]) == len(big)

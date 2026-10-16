@@ -9,8 +9,8 @@ import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
 
-MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
-MAX_UNPACKED_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 150 * 1024 * 1024  # = maxUploadSize в .streamlit/config.toml: проект вместе с примером данных
+MAX_UNPACKED_BYTES = 600 * 1024 * 1024  # в 4 раза больше архива (CSV сжимается в разы), но не zip-бомба
 MAX_FILES = 2000
 INVISIBLE_CHARS = set("\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 JUNK_PARTS = {
