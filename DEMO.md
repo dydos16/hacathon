@@ -8,7 +8,7 @@
 ```bash
 source .venv/bin/activate
 pytest -q --cov                    # 282 passed, 7 skipped (сеть, браузер, Docker — в CI), покрытие 100 % — показать при вопросах о качестве
-streamlit run app.py               # открыть http://localhost:8501
+streamlit run app.py --server.address 127.0.0.1  # открыть http://localhost:8501
 ```
 
 Держать открытым терминал в папке, куда скачается ZIP. Если нет интернета, демо-проект

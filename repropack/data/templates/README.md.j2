@@ -40,9 +40,18 @@ pip install -r requirements.txt
 
 ## Запуск
 
+Linux и macOS:
+
 ```bash
 cd project
 {{ run_command }}
+```
+
+Windows, в PowerShell. Не вставляйте эти команды в cmd.exe: там символы `&` и `|` в именах и аргументах запускают другие команды.
+
+```powershell
+cd project
+{{ run_command_ps }}
 ```
 {% if data_found %}
 ## Входные данные (включены в пакет)
