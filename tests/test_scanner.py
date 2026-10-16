@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from repropack import scanner
 from repropack.scanner import scan_notebook, scan_source
 
 
@@ -108,13 +109,35 @@ def test_syntax_error_is_reported_not_raised():
     assert codes(scan) == {"syntax_error"} and scan.imports == ()
 
 
+DEEP_UNARY = "x = " + "-" * 100_000 + "1\n"                                 # парсер: MemoryError
+LONG_SUM = "x = " + " + ".join(["a"] * 100_000) + "\n"                     # парсер: RecursionError
+
+
 @pytest.mark.parametrize("source, code", [
     ("import os\x00\n", "syntax_error"),                                    # NUL-байт
-    ("x = " + "-" * 100_000 + "1\n", "too_complex"),                        # парсер: MemoryError
-    ("x = " + " + ".join(["a"] * 100_000) + "\n", "too_complex"),           # парсер: RecursionError
+    (DEEP_UNARY, "long_statement"),
+    (LONG_SUM, "long_statement"),
 ], ids=["nul-byte", "deep-unary", "long-sum"])
 def test_unparsable_sources_are_reported_not_raised(source, code):
     assert codes(scan_source("bad.py", source)) == {code}
+
+
+@pytest.mark.parametrize("source", [DEEP_UNARY, LONG_SUM], ids=["deep-unary", "long-sum"])
+def test_too_complex_when_no_long_statement_can_be_skipped(monkeypatch, source):
+    monkeypatch.setattr(scanner, "LONG_STATEMENT_TOKENS", 10**9)
+    assert codes(scan_source("bad.py", source)) == {"too_complex"}
+
+
+def test_only_the_long_statement_is_skipped_and_lines_keep_numbers():
+    header = "if " + " + ".join(["a"] * 100_000) + ":\n    import json\n"
+    scan = scan_source("gen.py", f"import numpy\n{header}data = 'in.csv'\n")
+    assert [ref.module for ref in scan.imports] == ["numpy", "json"]
+    assert [(f.code, f.line) for f in scan.findings] == [("long_statement", 2)]
+    assert scan.data_refs == (("in.csv", 4),)
+
+
+def test_blank_long_statements_gives_up_on_broken_tokens():
+    assert scanner._blank_long_statements("x = (1,\n") == ("x = (1,\n", [])
 
 
 def test_huge_generated_formulas_do_not_crash_the_scanner():

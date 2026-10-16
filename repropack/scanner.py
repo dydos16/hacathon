@@ -1,10 +1,12 @@
 """Статический разбор Python-кода через ast. Загруженный код никогда не импортируется и не выполняется."""
 
 import ast
+import io
 import itertools
 import json
 import re
 import shlex
+import tokenize
 from dataclasses import dataclass, replace
 
 DATA_EXTENSIONS = (
@@ -35,6 +37,10 @@ SYNTAX_MIN_PYTHON = {getattr(ast, name): version for name, version in (
 # Что бросает ast.parse на коде, который не разобрать: синтаксис, NUL-байт (Python 3.11), глубокая вложенность
 SYNTAX_ERRORS = (SyntaxError, ValueError)
 COMPLEXITY_ERRORS = (RecursionError, MemoryError)
+# Логическая строка длиннее — сгенерированная формула. Если файл целиком не разобрался (лимит рекурсии парсера:
+# на Windows и в Python 3.11 он ниже), пропускаем только такие строки, а не весь файл с его импортами.
+LONG_STATEMENT_TOKENS = 500
+LAYOUT_TOKENS = {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
 # !pip, %pip, !pip3, !python -m pip, !{sys.executable} -m pip, !uv pip
 PIP_MAGIC = re.compile(r"^\s*[!%]\s*(?:\S+\s+-m\s+|uv\s+)?pip3?\s+install\s+(.+)$")
 # Конец команды pip: «;», «&&», «||», «|», «&» и перенаправления вывода («> log», «2>&1»)
@@ -309,10 +315,39 @@ def _unreadable(path: str, finding: Finding, pip_hints: tuple[str, ...] = (),
     return FileScan(path, (), (finding,), (), frozenset(), NO_REQUIREMENT, False, pip_hints, cell_lines)
 
 
+def _blank_long_statements(text: str) -> tuple[str, list[int]]:
+    """Логические строки длиннее LONG_STATEMENT_TOKENS → `pass` (заголовок блока → `if 0:`); номера строк те же."""
+    lines, blanked, statement = text.splitlines(keepends=True), [], []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type != tokenize.NEWLINE:
+                statement += [] if token.type in LAYOUT_TOKENS else [token]
+                continue
+            if len(statement) > LONG_STATEMENT_TOKENS:
+                (first, column), last = statement[0].start, statement[-1].end[0]
+                stub = "if 0:" if statement[-1].string == ":" else "pass"
+                lines[first - 1:last] = [lines[first - 1][:column] + stub + "\n"] + ["\n"] * (last - first)
+                blanked.append(first)
+            statement = []
+    except (tokenize.TokenError, SyntaxError):
+        return text, []
+    return "".join(lines), blanked
+
+
+def _parse(path: str, text: str) -> tuple[ast.AST, list[Finding]]:
+    try:
+        return ast.parse(text, filename=path), []
+    except COMPLEXITY_ERRORS:
+        reduced, blanked = _blank_long_statements(text)
+        if not blanked:
+            raise
+        return ast.parse(reduced, filename=path), [Finding("long_statement", line, "") for line in blanked]
+
+
 def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
                 cell_lines: tuple[tuple[int, int], ...] = ()) -> FileScan:
     try:
-        tree = ast.parse(text, filename=path)
+        tree, skipped = _parse(path, text)
     except COMPLEXITY_ERRORS:
         finding = Finding("too_complex", 0, "очень глубокая вложенность выражений")
         return _unreadable(path, finding, pip_hints, cell_lines)
@@ -321,7 +356,7 @@ def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
         return _unreadable(path, finding, pip_hints, cell_lines)
     visitor = _Visitor()
     visitor.run(tree)
-    findings = visitor.findings + [Finding(code, line, "") for code, line in visitor.first_lines.items()
+    findings = skipped + visitor.findings + [Finding(code, line, "") for code, line in visitor.first_lines.items()
                                    if not (visitor.seeded and code in SEEDABLE)]
     cli_import = next((i for i in visitor.imports if i.top in CLI_MODULES), None)
     if visitor.cli_line or cli_import:

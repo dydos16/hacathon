@@ -118,7 +118,7 @@ def test_run_args_are_not_expanded_in_verify_scripts(tmp_path: Path):
     sh_log = next(line for line in archive.read(f"{root}/verify.sh").decode().splitlines()
                   if line.startswith("log ") and "Запуск" in line)
     result = subprocess.run(["sh", "-c", f'log() {{ printf "%s" "$1"; }}; {sh_log}'],
-                            cwd=tmp_path, capture_output=True, text=True, check=True)
+                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", check=True)
     assert "$(touch pwned)" in result.stdout and not (tmp_path / "pwned").exists()
     ps1 = archive.read(f"{root}/verify.ps1").decode()
     assert "& $VPy 'analysis.py' '$(touch pwned)' 'it''s' '‘‘x’’'" in ps1

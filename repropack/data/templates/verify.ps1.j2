@@ -1,12 +1,18 @@
 # Проверка пакета в чистом виртуальном окружении (создано repro-packer).
 # Запуск: powershell -ExecutionPolicy Bypass -File verify.ps1
 Set-Location $PSScriptRoot
+# Windows PowerShell 5.1 пишет файлы в UTF-16/ANSI, а Python выводит в канал в cp1252 (кириллица падает).
+# Всё переводим на UTF-8: лог читается в любом редакторе, а вывод на русском не ломает запуск.
+$env:PYTHONUTF8 = "1"
+$Utf8 = New-Object System.Text.UTF8Encoding $false
+try { [Console]::OutputEncoding = $Utf8 } catch { }
 $Py = if ($env:PYTHON) { $env:PYTHON } else { "python" }
 $Log = Join-Path $PSScriptRoot "verify_log.txt"
 $VPy = Join-Path $PSScriptRoot ".repro-venv\Scripts\python.exe"
-function Log($Text) { $Text | Tee-Object -FilePath $Log -Append }
+function Append($Text) { [System.IO.File]::AppendAllText($Log, "$Text`r`n", $Utf8) }
+function Log($Text) { Write-Output $Text; Append $Text }
 
-Set-Content $Log ""
+[System.IO.File]::WriteAllText($Log, "", $Utf8)
 Log "== Проверка: $(Get-Date)"
 Log "Ожидается Python {{ python_version }}, найден: $(& $Py --version 2>&1)"
 $Found = & $Py -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
@@ -15,18 +21,18 @@ if ("$Found" -ne '{{ python_version }}') {
   Log "ВНИМАНИЕ: нужен Python {{ python_version }}, а запускается $Shown — результат может отличаться. Другой интерпретатор: задайте путь к нему в переменной окружения PYTHON"
 }
 if (Test-Path .repro-venv) { Remove-Item -Recurse -Force .repro-venv }
-& $Py -m venv .repro-venv *>> $Log
+& $Py -m venv .repro-venv 2>&1 | ForEach-Object { Append "$_" }
 if ($LASTEXITCODE -or -not (Test-Path $VPy)) { Log "ОШИБКА: не удалось создать venv"; exit 1 }
 
 Log "-- Установка зависимостей из requirements.txt"
-& $VPy -m pip install --disable-pip-version-check -r requirements.txt *>> $Log
+& $VPy -m pip install --disable-pip-version-check -r requirements.txt 2>&1 | ForEach-Object { Append "$_" }
 if ($LASTEXITCODE) { Log "РЕЗУЛЬТАТ: ОШИБКА установки зависимостей (подробности в $Log)"; exit 2 }
 & $VPy -m pip freeze | Set-Content requirements.lock.txt
 Log "-- Точные версии сохранены в requirements.lock.txt"
 
 Log {{ run_log_ps }}
 Push-Location project
-& $VPy {{ run_tail_ps }} *>&1 | Tee-Object -FilePath $Log -Append
+& $VPy {{ run_tail_ps }} 2>&1 | ForEach-Object { Log "$_" }
 $Code = $LASTEXITCODE
 Pop-Location
 if ($Code -eq 0) { Log "РЕЗУЛЬТАТ: OK (код выхода 0)" } else { Log "РЕЗУЛЬТАТ: ОШИБКА запуска (код выхода $Code)" }

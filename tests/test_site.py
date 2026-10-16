@@ -78,7 +78,7 @@ def download_package(page) -> zipfile.ZipFile:
 
 def test_demo_project_is_analyzed_and_package_downloads(page):
     page.get_by_text("Демо-проект", exact=True).first.click()
-    page.get_by_test_id("stSelectbox").click()
+    page.get_by_test_id("stSelectbox").first.click()  # первый список — выбор демо-проекта
     page.get_by_role("option", name=re.compile("messy_lab_project")).click()
     page.get_by_role("heading", name="5. Пакет воспроизводимости").wait_for()
     assert_no_errors(page)
