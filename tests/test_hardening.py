@@ -19,7 +19,7 @@ def test_security_promise_says_it_holds_only_for_local_runs():
     """Пункт 2: «секреты не покидают машину» верно только для локального запуска."""
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     promise = next(line for line in text.splitlines() if "не покидают машину" in line.lower())
-    assert "при локальном запуске" in promise
+    assert "при локальном запуске" in promise.lower()
     assert "общем сервере" in promise
 
 
