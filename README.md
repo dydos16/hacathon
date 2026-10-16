@@ -2,14 +2,14 @@
 
 Обнинский хакатон 2026 · направление «Наука и технологии» · **кейс 03: упаковщик научного кода**.
 
-Загружаете Python-скрипт, ноутбук или ZIP проекта — получаете **пакет воспроизводимости**:
+Загружаете Python-скрипт, ноутбук, ZIP или папку проекта целиком — получаете **пакет воспроизводимости**:
 `requirements.txt` с объяснением каждой строки, README с командами установки и запуска, `Dockerfile`,
 скрипт проверки в чистом окружении (`verify.sh` / `verify.ps1`) и честный отчёт о том, что определить не удалось.
 
 **Загруженный код никогда не выполняется**: импорты извлекаются статическим разбором (`ast`).
 
 ```
-ZIP / .py / .ipynb ──► intake ──► scanner (ast) ──► classify ──► analysis ──► packer ──► ZIP-пакет
+ZIP / папка / .py ──► intake ──► scanner (ast) ──► classify ──► analysis ──► packer ──► ZIP-пакет
                      безопасная   импорты, данные,   stdlib /       предупреждения   README, requirements,
                      распаковка   seed, пути         локальный /    и версия Python  Dockerfile, verify.sh,
                                                      PyPI                            REPORT.md, repro.json
@@ -23,7 +23,7 @@ pip install -e ".[dev]"
 streamlit run app.py                                     # веб-интерфейс: http://localhost:8501
 ```
 
-Без браузера (запасной вариант для защиты):
+Без браузера (запасной вариант для защиты, работает и без интернета):
 
 ```bash
 python -m repropack examples/messy_lab_project -o messy-repro.zip
@@ -119,12 +119,16 @@ REPRO_DOCKER_TESTS=1 pytest tests/test_docker.py       # Dockerfile пакета
 | [analysis.py](repropack/analysis.py) | сводный анализ: предупреждения, точка входа, версия Python |
 | [packer.py](repropack/packer.py) | генерация файлов по шаблонам и сборка ZIP |
 | [app.py](app.py) / [\_\_main\_\_.py](repropack/__main__.py) | веб-интерфейс / CLI |
+| [ui/](ui/) | оформление сайта: стили и иллюстрация на первом экране |
+| [templates/](repropack/data/templates/) | шаблоны файлов пакета: README, REPORT, Dockerfile, verify.sh, verify.ps1 |
+| [tests/](tests/) | автотесты: модули, интерфейс (AppTest), сайт в браузере, чистое окружение, Docker |
 
 ## Вклад команды и использованные компоненты
 
 _Заполнить перед защитой: участники и кто что сделал._
 
-Сторонние компоненты: Streamlit (интерфейс), Jinja2 (шаблоны), pandas (таблицы в интерфейсе), pytest (тесты).
+Сторонние компоненты: Streamlit (интерфейс), Jinja2 (шаблоны), pandas (таблицы в интерфейсе).
+Проверка: pytest и pytest-cov (тесты и покрытие), Playwright (сайт в браузере), GitHub Actions (CI на Windows, Linux и macOS), uv (установка минимальных версий зависимостей), Docker (сборка образа пакета).
 Стандартная библиотека: `ast`, `zipfile`, `tomllib`, `importlib.metadata`, `shlex`.
 Справочник «модуль → пакет» собран вручную. Готовые модели и внешние API не используются.
 
