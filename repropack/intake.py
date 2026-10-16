@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_UNPACKED_BYTES = 100 * 1024 * 1024
 MAX_FILES = 2000
+INVISIBLE_CHARS = set("\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 JUNK_PARTS = {
     "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", ".idea", ".vscode",
     ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache", "node_modules", "__MACOSX",
@@ -34,10 +35,13 @@ def _safe_path(raw: str) -> str | None:
 
     Буквы приводятся к NFC: macOS хранит «й» и «ё» разложенными, и без этого «данные_й.csv» из архива
     не совпало бы с тем же именем в коде."""
-    if any(ord(ch) < 32 for ch in raw):
-        raise IntakeError(f"Управляющие символы в имени файла: {raw!r}")
+    # Управляющие и невидимые символы смены направления текста: «x\u202eyp.txt» выглядит как «xtxt.py»
+    if any(ord(ch) < 32 or 0x7f <= ord(ch) <= 0x9f or ch in INVISIBLE_CHARS for ch in raw):
+        raise IntakeError(f"Управляющие или невидимые символы в имени файла: {raw!r}")
     path = PurePosixPath(unicodedata.normalize("NFC", raw).replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts or (path.parts and ":" in path.parts[0]):
+    # «:» в любой части пути — на Windows это поток NTFS («a/C:evil.py»); точку и пробел в конце Windows отрезает
+    if (path.is_absolute() or ".." in path.parts or any(":" in part for part in path.parts)
+            or any(part.endswith((".", " ")) for part in path.parts if part != ".")):
         raise IntakeError(f"Небезопасный путь в архиве: {raw!r}")
     if not path.parts or any(p in JUNK_PARTS for p in path.parts):
         return None

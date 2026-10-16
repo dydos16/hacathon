@@ -8,14 +8,18 @@ from pathlib import PurePosixPath
 
 from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
                        parse_declared)
-from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source
-from .secrets import SecretHit, env_names, find_secrets, is_secret_file
+from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source, skipped_scan
+from .secrets import SecretHit, env_names, file_text, find_secrets, is_secret_file, redact
 
 DEFAULT_PYTHON = (3, 11)
 ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "train.py")
 LEVEL_ORDER = {"high": 0, "medium": 1, "info": 2}
 UNRESOLVABLE_DATA = "*{}<>|%"  # шаблоны имён (glob, %-формат): конкретный файл по ним не найти
 PYTHON_CLAUSE = re.compile(r"(\^|~=|~|===|==|!=|<=|>=|<|>)?\s*(\d+)(?:\.(\d+))?(?:\.[\d*]+)*")
+MAX_TOTAL_CODE_CHARS = 10_000_000  # весь проект: крошечный ZIP с мегабайтами кода не должен занимать сервер минутами
+# Управляющие символы и смена направления текста из загрузки (имя модуля, путь) не попадают в отчёт, README и
+# терминал: перевод строки дописал бы в REPORT.md свой заголовок, а ESC-последовательность — сменила бы заголовок окна
+UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 CONDA_ONLY_SHOWN = 8
 PLACES_SHOWN = 3
 AUXILIARY_PATH = re.compile(r"(^|/)((setup|conftest|noxfile)\.py|test_[^/]*|[^/]*_test\.py)$"
@@ -57,13 +61,21 @@ def decode(data: bytes) -> str:
 
 
 def _scan_all(files: dict[str, bytes]) -> list[FileScan]:
-    scans = []
+    scans, budget = [], MAX_TOTAL_CODE_CHARS
     for path, data in sorted(files.items()):
         if path.endswith(".py"):
-            scans.append(scan_source(path, decode(data)))
+            text = decode(data)
+            budget -= len(text)
+            scans.append(scan_source(path, text) if budget >= 0 else
+                         skipped_scan(path, f"исчерпан лимит {MAX_TOTAL_CODE_CHARS // 1_000_000} МБ кода на проект"))
         elif path.endswith(".ipynb"):
             scans.append(scan_notebook(path, decode(data)))
     return scans
+
+
+def clean(text: str) -> str:
+    """Текст из загрузки для отчёта: без управляющих символов и без секретов (их значения → <REDACTED>)."""
+    return redact(UNSAFE_CHARS.sub(" ", text))
 
 
 def is_auxiliary(path: str) -> bool:
@@ -97,7 +109,7 @@ def _entry_candidates(scans: list[FileScan]) -> tuple[str, ...]:
 def _python_range(hint: str) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
     """Нижняя и верхняя (включительно) границы версии Python из «>=3.8,<3.11», «^3.10», «3.10.13»…"""
     low = high = None
-    for operator, major, minor in PYTHON_CLAUSE.findall(hint):
+    for operator, major, minor in PYTHON_CLAUSE.findall(hint[:200]):  # длинная строка из пробелов — ReDoS
         version = (int(major), int(minor or 0))
         if operator in ("", "==", "===", ">=", ">", "~=", "~", "^"):
             low = max(low or version, version)
@@ -204,6 +216,9 @@ def _relative_import_issues(scans: list[FileScan], files: dict[str, bytes]) -> l
 FINDING_ISSUES = {
     "syntax_error": ("high", "Файл не разбирается как Python 3",
                      "{detail}. Возможно, это код Python 2 или опечатка — импорты из файла не учтены"),
+    "too_large": ("high", "Файл слишком большой для разбора",
+                  "{detail}: разбираются файлы до 1 МБ кода и до 10 МБ на проект — импорты из файла не учтены, "
+                  "проверьте их вручную"),
     "too_complex": ("high", "Файл слишком сложный для разбора",
                     "{detail} — импорты из файла не учтены, проверьте их вручную"),
     "long_statement": ("info", "Очень длинное выражение пропущено при разборе",
@@ -351,8 +366,9 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     python, python_reason, python_issues = _suggest_python(scans, deps, python_hint)
     secret_files = tuple(p for p in files if is_secret_file(p))
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
-                    for hit in find_secrets(p, decode(data)))
+                    for hit in find_secrets(p, file_text(data)[0]))
     data_found, data_missing = _data_refs(scans, files)
+    data_missing = [(clean(ref), where) for ref, where in data_missing]
     hygiene = _hygiene(files, data_found, bool(declared))
 
     issues = python_issues + _finding_issues(scans) + _relative_import_issues(scans, files)
@@ -365,6 +381,8 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
         issues.append(Issue("info", "Несколько точек входа", "выберите, какой файл запускать"))
     issues += [Issue("info", f"Нет: {name}", "не обязательно, но помогает повторить эксперимент")
                for name, present in hygiene if not present]
+    # Детали проблем берут куски кода (аргумент exec, имя модуля…): секрет в них не должен уйти в отчёт и интерфейс
+    issues = [Issue(i.level, clean(i.title), clean(i.detail), i.where) for i in issues]
 
     return Analysis(
         files=files, scans=tuple(scans), dependencies=tuple(deps),

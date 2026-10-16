@@ -4,6 +4,8 @@ maxUploadSize = 20
 
 [client]
 toolbarMode = "minimal"
+# Ошибка показывается без трассировки: пути и код сервера посетителю не нужны (в терминале она видна полностью)
+showErrorDetails = "none"
 
 [browser]
 gatherUsageStats = false

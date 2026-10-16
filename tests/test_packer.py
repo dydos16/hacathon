@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from repropack import packer
 from repropack.__main__ import main
 from repropack.analysis import analyze
 from repropack.intake import read_directory
@@ -251,3 +252,30 @@ def test_report_lists_installed_versions_only_with_consent():
     without = rendered(False)
     assert "Версии установленной среды" not in without["REPORT.md"]
     assert json.loads(without["repro.json"])["local_environment"] == {}
+
+
+def test_entry_point_starting_with_dash_is_a_path_not_a_python_option(tmp_path: Path):
+    """Аудит: файл «-copen(…)#.py» выполнял код из своего имени (python -c …) вместо самого скрипта."""
+    name = "-copen('MARKER','w')#.py"
+    analysis = analyze({name: b"print('script body')\n"})
+    generated = render_package(analysis, PackOptions("p", name, "3.12", ()))
+    assert "'./-copen(" in generated["verify.sh"] and "'./-copen(" in generated["verify.ps1"]
+    assert '"./-copen(' in generated["Dockerfile"]
+    notebook = render_package(analyze({"-x.ipynb": b'{"cells": []}'}), PackOptions("p", "-x.ipynb", "3.12", ()))
+    assert "--execute ./-x.ipynb" in notebook["verify.sh"]
+
+
+def test_secret_left_after_redaction_stops_the_build(monkeypatch):
+    monkeypatch.setattr(packer, "redact_bytes", lambda path, data: data)  # вымарывание «сломалось»
+    analysis = analyze({"main.py": f"API_KEY = '{FAKE_KEY}'\n".encode()})
+    with pytest.raises(ValueError, match="не удалось заменить"):
+        build_zip(analysis, PackOptions("p", "main.py", "3.11", ()))
+
+
+@pytest.mark.parametrize("python, package, version", [
+    ("3.11\n", "numpy", ""), ("３.１１", "numpy", ""), ("3.11", "numpy\n", ""), ("3.11", "numpy", "1.0\n,>=2"),
+])
+def test_values_must_match_entirely_without_newlines_or_unicode_digits(python, package, version):
+    analysis = analyze({"main.py": b"import numpy\n"})
+    with pytest.raises(ValueError):
+        render_package(analysis, PackOptions("p", "main.py", python, (Requirement(package, version),)))

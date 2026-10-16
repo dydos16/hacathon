@@ -15,7 +15,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from . import __version__
 from .analysis import Analysis, decode
 from .classify import LOCAL_ENV, PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
-from .secrets import env_names, redact_bytes
+from .secrets import env_names, file_text, find_secrets, redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
@@ -24,7 +24,8 @@ CATEGORIES = {"stdlib": "стандартная библиотека", "removed"
               "conda_only": "пакет conda (не для pip)"}
 LEVELS = {"high": "критично", "medium": "нужно решение", "info": "к сведению"}
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?$")
-PYTHON_VERSION = re.compile(r"^\d+\.\d+$")
+# ASCII-цифры целиком: «$» пропускает завершающий перевод строки, а \d — цифры вроде «３.１１»
+PYTHON_VERSION = re.compile(r"[0-9]+\.[0-9]+")
 VERSION_OPERATORS = ("==", ">=", "<=", "~=", "!=", ">", "<")
 NOTEBOOK_RUNNERS = ("nbconvert", "ipykernel")
 # Системные библиотеки Debian, без которых пакет не ставится или не импортируется в образе python:*-slim
@@ -95,9 +96,10 @@ def _spec(version: str) -> str:
 
 
 def _validate(req: Requirement) -> None:
-    if not PACKAGE_NAME.match(req.package):
+    # fullmatch: «$» в шаблоне (он же уходит в проверку таблицы на JS) пропускает завершающий перевод строки
+    if not PACKAGE_NAME.fullmatch(req.package):
         raise ValueError(f"Некорректное имя пакета: {req.package!r}")
-    if not VERSION_SPEC.match(req.version):
+    if not VERSION_SPEC.fullmatch(req.version):
         raise ValueError(f"Некорректная версия для {req.package}: {req.version!r}")
 
 
@@ -127,10 +129,12 @@ def requirements_text(reqs: tuple[Requirement, ...], created: str) -> str:
 
 
 def run_parts(entry_point: str, run_args: str) -> list[str]:
-    if entry_point.endswith(".ipynb"):
-        return ["-m", "nbconvert", "--to", "notebook", "--execute", entry_point, "--output", "executed.ipynb"]
+    # Имя файла с «-» в начале python принял бы за ключ: «-copen(…)#.py» выполнил бы код из имени, а не скрипт
+    entry = f"./{entry_point}" if entry_point.startswith("-") else entry_point
+    if entry.endswith(".ipynb"):
+        return ["-m", "nbconvert", "--to", "notebook", "--execute", entry, "--output", "executed.ipynb"]
     try:
-        return [entry_point, *shlex.split(run_args)]
+        return [entry, *shlex.split(run_args)]
     except ValueError as exc:
         raise ValueError(f"Аргументы запуска не разобрать (незакрытая кавычка?): {run_args!r}") from exc
 
@@ -218,7 +222,7 @@ def _manifest(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement,
 
 def render_package(analysis: Analysis, options: PackOptions, created: str | None = None) -> dict[str, str]:
     """Сгенерированные файлы пакета (без исходников) — для предпросмотра в интерфейсе и для ZIP."""
-    if not PYTHON_VERSION.match(options.python_version):
+    if not PYTHON_VERSION.fullmatch(options.python_version):
         raise ValueError(f"Некорректная версия Python: {options.python_version!r} — нужна вида 3.11")
     created = created or datetime.now(timezone.utc).isoformat(timespec="seconds")
     reqs = _with_notebook_runners(options)
@@ -242,8 +246,12 @@ def env_templates(analysis: Analysis) -> dict[str, str]:
 def _project_files(analysis: Analysis) -> dict[str, bytes]:
     """Исходники для пакета: без файлов-секретов, с замаскированными секретами в тексте."""
     with_secrets = {h.path for h in analysis.secrets}
-    sources = {path: redact_bytes(data) if path in with_secrets else data
+    sources = {path: redact_bytes(path, data) if path in with_secrets else data
                for path, data in analysis.files.items() if path not in analysis.secret_files}
+    # Страховка: найденное, но не вымаранное значение не уходит в пакет — сборка останавливается
+    if leaked := [path for path in with_secrets if find_secrets(path, file_text(sources[path])[0])]:
+        raise ValueError(f"секрет в {', '.join(sorted(leaked))} не удалось заменить на <REDACTED> — "
+                         "уберите его из файла вручную")
     return {**sources, **{path: text.encode() for path, text in env_templates(analysis).items()}}
 
 

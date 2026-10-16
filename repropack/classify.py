@@ -46,7 +46,8 @@ _OPERATOR = r"(?:==|!=|<=|>=|~=|<|>)"
 _VERSION = r"\d[A-Za-z0-9.*+!_-]*"
 # Версия для requirements.txt: «1.26.4», «>=2.0», «>=1.2,<2» или пусто. Шаблон совместим с JavaScript:
 # интерфейс проверяет им ячейки таблицы
-VERSION_SPEC = re.compile(rf"^\s*(?:(?:{_OPERATOR}\s*)?{_VERSION}\s*(?:,\s*{_OPERATOR}\s*{_VERSION}\s*)*)?$")
+# Пробелы — только « » и табуляция: \s пропускал перевод строки, и «версия» разрывала строку requirements.txt
+VERSION_SPEC = re.compile(rf"^[ \t]*(?:(?:{_OPERATOR}[ \t]*)?{_VERSION}[ \t]*(?:,[ \t]*{_OPERATOR}[ \t]*{_VERSION}[ \t]*)*)?$")
 PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
 DECLARED_ONLY_NOTE = "объявлено, но import не найден (плагин, бэкенд или лишняя зависимость)"
 CONDA_ONLY_NOTE = "пакет conda без import в коде — в requirements.txt не включён"
@@ -102,7 +103,7 @@ def _notes(*notes: str) -> str:
 def _clean_spec(spec: str) -> str:
     """Спецификатор, понятный pip; ссылки, маркеры и прочее — «версия неизвестна»."""
     spec = spec.strip()
-    return spec if VERSION_SPEC.match(spec) else ""
+    return spec if VERSION_SPEC.fullmatch(spec) else ""
 
 
 def _requirement(line: str) -> tuple[str, str] | None:
@@ -169,7 +170,7 @@ def _strings(value: object) -> list[str]:
 def _from_pyproject(text: str, source: str) -> tuple[list[Declared], str]:
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    except (tomllib.TOMLDecodeError, RecursionError):  # глубокая вложенность — тоже «не прочитать»
         return [], ""
     project = _table(data, "project")
     poetry = _table(data, "tool", "poetry", "dependencies")
@@ -180,7 +181,7 @@ def _from_pyproject(text: str, source: str) -> tuple[list[Declared], str]:
 def _from_pipfile(text: str, source: str) -> tuple[list[Declared], str]:
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
+    except (tomllib.TOMLDecodeError, RecursionError):  # глубокая вложенность — тоже «не прочитать»
         return [], ""
     return _from_table(_table(data, "packages"), source), str(_table(data, "requires").get("python_version") or "")
 

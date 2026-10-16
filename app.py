@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import io
+import os
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -59,7 +60,8 @@ PREVIEW_HEIGHT = 480  # px: длинный отчёт прокручиваетс
 st.set_page_config(page_title="repro-packer", layout="wide")
 
 
-@st.cache_data(show_spinner="Статический разбор кода…")
+# Кэш ограничен: на общем сервере каждая загрузка (вместе с исключёнными .env) иначе жила бы в памяти вечно
+@st.cache_data(show_spinner="Статический разбор кода…", max_entries=16, ttl=3600)
 def cached_analysis(files: dict[str, bytes], use_local_env: bool) -> Analysis:
     return analyze(files, use_local_env)
 
@@ -323,9 +325,11 @@ def main() -> None:
     except IntakeError as exc:
         st.error(f"Не удалось принять загрузку: {exc}")
         return
-    use_local_env = st.checkbox("Читать версии пакетов из среды, где запущен repro-packer",
-                                help="Только при локальном запуске: версии берутся из importlib.metadata этой "
-                                     "машины. Без согласия версии не читаются.")
+    # На общем сервере (REPRO_PUBLIC=1) версии «из среды» — это пакеты и ОС сервера, их не показываем посетителям
+    use_local_env = not os.environ.get("REPRO_PUBLIC") and st.checkbox(
+        "Читать версии пакетов из среды, где запущен repro-packer",
+        help="Только при локальном запуске: версии берутся из importlib.metadata этой машины. "
+             "Без согласия версии не читаются.")
     if source is None:
         show_start_screen()
         return

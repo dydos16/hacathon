@@ -40,6 +40,7 @@ COMPLEXITY_ERRORS = (RecursionError, MemoryError)
 # Логическая строка длиннее — сгенерированная формула. Если файл целиком не разобрался (лимит рекурсии парсера:
 # на Windows и в Python 3.11 он ниже), пропускаем только такие строки, а не весь файл с его импортами.
 LONG_STATEMENT_TOKENS = 500
+MAX_CODE_CHARS = 1_000_000  # один файл; настоящие скрипты на порядки меньше, а мегабайт кода — сотни МБ памяти ast
 LAYOUT_TOKENS = {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
 # !pip, %pip, !pip3, !python -m pip, !{sys.executable} -m pip, !uv pip
 PIP_MAGIC = re.compile(r"^\s*[!%]\s*(?:\S+\s+-m\s+|uv\s+)?pip3?\s+install\s+(.+)$")
@@ -251,7 +252,7 @@ class _Visitor:
         if last in SYS_PATH_CALLS and parts[:-1] == ["sys", "path"]:
             self.first_lines.setdefault("sys_path", node.lineno)
         if _is_home(parts, node):
-            self.findings.append(Finding("absolute_path", node.lineno, ast.unparse(node)))
+            self.findings.append(Finding("absolute_path", node.lineno, _source(node)))
         if last in OUTPUT_CALLS or (parts == ["open"] and _opens_for_write(node)):
             self.outputs.update(_output_names(node))
         return _children(node, context)
@@ -262,7 +263,7 @@ class _Visitor:
             self.imports.append(ImportRef(arg.value, node.lineno, "dynamic"))
             self.findings.append(Finding("dynamic_import", node.lineno, arg.value))
         else:
-            source = ast.unparse(arg) if arg is not None else ""
+            source = _source(arg) if arg is not None else ""
             self.findings.append(Finding("dynamic_unresolved", node.lineno, source))
 
     def _exec(self, node: ast.Call, name: str) -> None:
@@ -271,7 +272,7 @@ class _Visitor:
         arg = node.args[0] if node.args else None
         if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
             if name == "exec" and arg is not None:
-                self.findings.append(Finding("exec_unresolved", node.lineno, ast.unparse(arg)))
+                self.findings.append(Finding("exec_unresolved", node.lineno, _source(arg)))
             return
         inner = _Visitor()
         try:
@@ -292,7 +293,7 @@ class _Visitor:
         """Части f-строки — не имена файлов, но абсолютный путь в её начале виден сразу."""
         head = node.values[0] if node.values else None
         if isinstance(head, ast.Constant) and ABSOLUTE_PATH.match(str(head.value)):
-            self.findings.append(Finding("absolute_path", node.lineno, ast.unparse(node)))
+            self.findings.append(Finding("absolute_path", node.lineno, _source(node)))
         return [(part, context) for part in node.values if not isinstance(part, ast.Constant)]
 
     def visit_Constant(self, node: ast.Constant, context: Context) -> list:
@@ -305,6 +306,14 @@ class _Visitor:
         return []
 
 
+def _source(node: ast.AST) -> str:
+    """Текст выражения для отчёта; на очень глубоком выражении ast.unparse упирается в лимит рекурсии."""
+    try:
+        return ast.unparse(node)
+    except RecursionError:
+        return "(слишком глубокое выражение)"
+
+
 def _min_python(tree: ast.AST) -> tuple[int, int]:
     found = [SYNTAX_MIN_PYTHON[type(n)] for n in ast.walk(tree) if type(n) in SYNTAX_MIN_PYTHON]
     return max(found, default=NO_REQUIREMENT)
@@ -313,6 +322,11 @@ def _min_python(tree: ast.AST) -> tuple[int, int]:
 def _unreadable(path: str, finding: Finding, pip_hints: tuple[str, ...] = (),
                 cell_lines: tuple[tuple[int, int], ...] = ()) -> FileScan:
     return FileScan(path, (), (finding,), (), frozenset(), NO_REQUIREMENT, False, pip_hints, cell_lines)
+
+
+def skipped_scan(path: str, detail: str) -> FileScan:
+    """Файл не разбирался из-за размера: ast на мегабайтах кода занимает гигабайты памяти и десятки секунд."""
+    return _unreadable(path, Finding("too_large", 0, detail))
 
 
 def _blank_long_statements(text: str) -> tuple[str, list[int]]:
@@ -346,6 +360,9 @@ def _parse(path: str, text: str) -> tuple[ast.AST, list[Finding]]:
 
 def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
                 cell_lines: tuple[tuple[int, int], ...] = ()) -> FileScan:
+    if len(text) > MAX_CODE_CHARS:
+        return replace(skipped_scan(path, f"{len(text) / 1_000_000:.1f} МБ кода"), pip_hints=pip_hints,
+                       cell_lines=cell_lines)
     try:
         tree, skipped = _parse(path, text)
     except COMPLEXITY_ERRORS:
