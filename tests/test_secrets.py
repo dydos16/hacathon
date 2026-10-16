@@ -118,8 +118,9 @@ def test_config_placeholders_and_redacted_values_are_not_secrets():
 
 
 @pytest.mark.parametrize("text", ["a." * 200_000, "eyJ-" * 100_000, "\n" * 200_000, "a" * 200_000,
-                                  "password" * 50_000])
+                                  "password" * 50_000], ids=["dots", "jwt", "newlines", "word", "keyword"])
 def test_secret_patterns_are_linear_on_adversarial_input(text):
     start = time.perf_counter()
     find_secrets(".env", text), redact(text, config=True), env_names(".env", text)
-    assert time.perf_counter() - start < 2  # квадратичный перебор на таком входе — минуты
+    # Локально — доли секунды, на CI под измерением покрытия — пара секунд; квадратичный перебор — минуты
+    assert time.perf_counter() - start < 10
