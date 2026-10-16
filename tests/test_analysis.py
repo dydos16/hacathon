@@ -63,3 +63,12 @@ def test_repeated_issue_from_many_files_is_reported_once():
     files = {f"m{i}.py": b"import random\nrandom.random()\n" for i in range(5)}
     seeds = [i for i in analyze(files).issues if "seed" in i.title]
     assert [i.where for i in seeds] == ["m0.py:2, m1.py:2, m2.py:2 и ещё 2"]
+
+
+def test_excluded_secret_file_asks_for_a_decision_and_names_the_variables():
+    analysis = analyze({"main.py": b"import os\n", ".env": b"# db\nexport DB_PASSWORD=hunter2hunter2\nAPI_TOKEN = x\n",
+                        "keys/server.pem": b"-----BEGIN PRIVATE KEY-----\n"})
+    issues = {i.where: i for i in analysis.issues if i.title == "Файл с секретами исключён из пакета"}
+    assert {i.level for i in issues.values()} == {"medium"}  # исключить — верно; исправлять автору нечего
+    assert "DB_PASSWORD, API_TOKEN" in issues[".env"].detail and ".env.example" in issues[".env"].detail
+    assert "hunter2" not in issues[".env"].detail and "отдельно" in issues["keys/server.pem"].detail

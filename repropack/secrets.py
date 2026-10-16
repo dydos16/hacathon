@@ -32,6 +32,7 @@ PATTERNS = [
         r"""(?i)\b\w*?(?:api_?key|secret(?:_?key)?|token|passw(?:or)?d|pwd)\b["']?\s*[:=]\s*["']([^"'\s]{8,})["']""")),
 ]
 MASK_REVEAL_FROM = 20
+ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", re.M)
 PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 
 
@@ -49,6 +50,13 @@ def is_secret_file(path: str) -> bool:
         return False
     return (name in SECRET_FILE_NAMES or name.startswith(".env.")
             or PurePosixPath(name).suffix.lower() in SECRET_FILE_SUFFIXES)
+
+
+def env_names(path: str, text: str) -> list[str]:
+    """Имена переменных из файла .env (без значений) — их можно показать и передать коллеге."""
+    if not PurePosixPath(path).name.startswith(".env"):
+        return []
+    return list(dict.fromkeys(ENV_ASSIGNMENT.findall(text)))
 
 
 def _is_text(path: str) -> bool:

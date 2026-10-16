@@ -2,6 +2,7 @@
 
 import io
 import json
+import posixpath
 import re
 import shlex
 import zipfile
@@ -12,9 +13,9 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import __version__
-from .analysis import Analysis
+from .analysis import Analysis, decode
 from .classify import PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
-from .secrets import redact_bytes
+from .secrets import env_names, redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
@@ -34,6 +35,8 @@ SYSTEM_PACKAGES = {
 }
 # Docker отправляет демону всю папку: окружение и логи verify.sh не нужны и весят сотни мегабайт
 DOCKERIGNORE = ".repro-venv/\nverify_log.txt\nrun_output.txt\n"
+ENV_TEMPLATE_HEADER = ("# Создано repro-packer вместо исключённого файла с секретами: значения автора удалены.\n"
+                       "# Впишите свои значения и переименуйте файл в .env\n")
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,8 @@ def slugify(name: str) -> str:
 
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
-    system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs if normalize(r.package) in SYSTEM_PACKAGES]
+    system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs
+              if normalize(r.package) in SYSTEM_PACKAGES]
     run_tail = shlex.join(parts)
     run_log = f"-- Запуск: python {run_tail}"
     return {
@@ -145,7 +149,7 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
         "run_tail_ps": " ".join(map(ps_quote, parts)),
         "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
-        "excluded": analysis.secret_files, "redacted": bool(analysis.secrets),
+        "excluded": analysis.secret_files, "redacted": bool(analysis.secrets), "env_templates": env_templates(analysis),
         "key_issues": [i for i in analysis.issues if i.level != "info"], "issues": analysis.issues,
         "dependencies": analysis.dependencies, "hygiene": analysis.hygiene,
         "categories": CATEGORIES, "levels": LEVELS,
@@ -178,11 +182,22 @@ def render_package(analysis: Analysis, options: PackOptions, created: str | None
             "repro.json": _manifest(analysis, options, reqs, ctx)}
 
 
+def env_templates(analysis: Analysis) -> dict[str, str]:
+    """Вместо исключённого .env — .env.example с именами переменных без значений; шаблон автора не трогаем."""
+    names: dict[str, list[str]] = {}
+    for path in analysis.secret_files:
+        target = posixpath.join(posixpath.dirname(path), ".env.example")
+        names.setdefault(target, []).extend(env_names(path, decode(analysis.files[path])))
+    return {target: ENV_TEMPLATE_HEADER + "".join(f"{name}=\n" for name in dict.fromkeys(found))
+            for target, found in names.items() if found and target not in analysis.files}
+
+
 def _project_files(analysis: Analysis) -> dict[str, bytes]:
     """Исходники для пакета: без файлов-секретов, с замаскированными секретами в тексте."""
     with_secrets = {h.path for h in analysis.secrets}
-    return {path: redact_bytes(data) if path in with_secrets else data
-            for path, data in analysis.files.items() if path not in analysis.secret_files}
+    sources = {path: redact_bytes(data) if path in with_secrets else data
+               for path, data in analysis.files.items() if path not in analysis.secret_files}
+    return {**sources, **{path: text.encode() for path, text in env_templates(analysis).items()}}
 
 
 def build_zip(analysis: Analysis, options: PackOptions) -> bytes:

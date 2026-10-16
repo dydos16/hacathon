@@ -58,7 +58,7 @@ NOTEBOOK = json.dumps({"cells": [{"cell_type": "code", "metadata": {}, "outputs"
 
 @pytest.mark.parametrize("demo, critical, verdict", [
     ("numpy_pandas_script", "0", "Почти готово"), ("local_module_project", "0", "Явных препятствий нет"),
-    ("messy_lab_project", "6", "Скорее всего, у коллеги не запустится")])
+    ("messy_lab_project", "5", "Скорее всего, у коллеги не запустится")])
 def test_demo_project_flow_renders_without_errors(demo, critical, verdict):
     app = open_demo(demo)
     metrics = {m.label: m.value for m in app.metric}

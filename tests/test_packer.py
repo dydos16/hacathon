@@ -47,6 +47,15 @@ def test_secrets_are_excluded_and_redacted_in_package():
     assert "sk-DEMO" not in code and "<REDACTED>" in code
     blob = b"".join(archive.read(n) for n in names)
     assert b"demo-not-a-real-password" not in blob and b"sk-DEMO0000" not in blob
+    template = archive.read(f"{root}/project/.env.example").decode()
+    assert "LAB_DB_PASSWORD=\n" in template
+    assert "project/.env.example" in archive.read(f"{root}/README.md").decode()
+
+
+def test_authors_own_env_template_is_kept():
+    analysis = analyze({"main.py": b"print(1)\n", ".env": b"A=secret-value\n", ".env.example": b"A=<your key>\n"})
+    rendered = zipfile.ZipFile(io.BytesIO(build_zip(analysis, PackOptions("p", "main.py", "3.11", ()))))
+    assert rendered.read("p-repro/project/.env.example") == b"A=<your key>\n"
 
 
 def test_redacted_author_file_keeps_its_encoding():
@@ -148,7 +157,9 @@ def test_docker_context_skips_local_venv_and_logs():
     assert ".repro-venv" in archive.read(f"{root}/.dockerignore").decode()
 
 
-FAKE_PYTHON = '#!/bin/sh\ncase "$1" in\n  --version) echo "Python $FAKE.0" ;;\n  -c) echo "$FAKE" ;;\n  *) exit 3 ;;\nesac\n'
+# Подделка интерпретатора: сообщает версию $FAKE, а создать venv не может
+FAKE_PYTHON = ('#!/bin/sh\ncase "$1" in\n  --version) echo "Python $FAKE.0" ;;\n  -c) echo "$FAKE" ;;\n'
+               '  *) exit 3 ;;\nesac\n')
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="нужен POSIX sh")
@@ -178,7 +189,7 @@ def test_cli_builds_package(tmp_path: Path, capsys):
     assert main([str(EXAMPLES / "messy_lab_project"), "-o", str(output)]) == 0
     assert zipfile.is_zipfile(output)
     out = capsys.readouterr().out
-    assert "[критично]" in out and "Итого: 6 критичных" in out and "используются модули, удалённые" in out
+    assert "[критично]" in out and "Итого: 5 критичных" in out and "используются модули, удалённые" in out
 
 
 def test_cli_version_and_unwritable_output(tmp_path: Path, capsys):

@@ -50,6 +50,8 @@ cd project
 ## Исключено из пакета
 
 {% for path in excluded %}- `{{ path }}` — похоже на файл с секретами
+{% endfor %}{% for path in env_templates %}
+Имена переменных без значений — в `project/{{ path }}`: впишите свои значения и переименуйте файл в `.env`.
 {% endfor %}{% endif %}
 ## Docker (альтернатива)
 

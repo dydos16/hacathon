@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from .classify import (PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
                        parse_declared)
 from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source
-from .secrets import SecretHit, find_secrets, is_secret_file
+from .secrets import SecretHit, env_names, find_secrets, is_secret_file
 
 DEFAULT_PYTHON = (3, 11)
 ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "train.py")
@@ -296,9 +296,19 @@ def _hygiene(files: dict[str, bytes], data_found: list[str], has_declared: bool)
     )
 
 
-def _secret_issues(secret_files: tuple[str, ...], secrets: tuple[SecretHit, ...]) -> list[Issue]:
-    issues = [Issue("high", "Файл с секретами исключён из пакета",
-                    "не передавайте его коллегам; опишите нужные переменные в README", p) for p in secret_files]
+def _excluded_detail(path: str, data: bytes) -> str:
+    names = env_names(path, decode(data))
+    if names:
+        return (f"коллеге нужны свои значения переменных {', '.join(names)}: они перечислены без значений "
+                "в .env.example пакета — впишите значения и переименуйте файл в .env")
+    return "если код читает этот файл, коллеге понадобится свой — передайте его отдельно, не в архиве"
+
+
+def _secret_issues(files: dict[str, bytes], secret_files: tuple[str, ...],
+                   secrets: tuple[SecretHit, ...]) -> list[Issue]:
+    # Исключить файл — правильно, и автору исправлять нечего: это решение для коллеги, а не поломка
+    issues = [Issue("medium", "Файл с секретами исключён из пакета", _excluded_detail(p, files[p]), p)
+              for p in secret_files]
     issues += [Issue("high", f"Похоже на секрет: {h.kind} ({h.masked})",
                      "в пакете значение заменено на <REDACTED> — передавайте его через переменную окружения",
                      f"{h.path}:{h.line}") for h in secrets]
@@ -331,7 +341,7 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     hygiene = _hygiene(files, data_found, bool(declared))
 
     issues = python_issues + _finding_issues(scans) + _relative_import_issues(scans, files)
-    issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(secret_files, secrets)
+    issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(files, secret_files, secrets)
     issues += [Issue("high", f"Файл данных «{ref}» не найден",
                      "приложите пример данных или опишите в README, где его взять "
                      "(если это файл, который скрипт сам создаёт, — пропустите)", where)
