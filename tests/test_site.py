@@ -70,6 +70,15 @@ def assert_no_errors(page) -> None:
     assert exceptions.count() == 0, exceptions.first.inner_text()
 
 
+def choose_demo(page, name: str) -> None:
+    """Список демо открывается только после того, как Streamlit дорисовал страницу (последняя вкладка
+    «Состав архива» на месте): перерисовка после клика по «Демо-проект» закрывает уже открытый список."""
+    page.get_by_text("Демо-проект", exact=True).first.click()
+    page.get_by_role("tab", name="Состав архива").wait_for()
+    page.get_by_test_id("stSelectbox").first.click()  # первый список — выбор демо-проекта
+    page.get_by_role("option", name=re.compile(name)).click()
+
+
 def download_package(page, root: str) -> list[str]:
     """Скачивает пакет; пока Streamlit пересчитывает страницу, кнопка может отдавать прошлый проект — ждём нужный."""
     deadline = time.monotonic() + TIMEOUT_MS / 1000
@@ -84,9 +93,7 @@ def download_package(page, root: str) -> list[str]:
 
 
 def test_demo_project_is_analyzed_and_package_downloads(page):
-    page.get_by_text("Демо-проект", exact=True).first.click()
-    page.get_by_test_id("stSelectbox").first.click()  # первый список — выбор демо-проекта
-    page.get_by_role("option", name=re.compile("messy_lab_project")).click()
+    choose_demo(page, "messy_lab_project")
     page.get_by_role("button", name=re.compile("Скачать пакет")).wait_for()
     assert_no_errors(page)
     names = download_package(page, "messy-lab-project")
