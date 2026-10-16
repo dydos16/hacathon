@@ -177,6 +177,78 @@ def test_unexpected_cell_shapes_are_ignored():
     assert kinds(scan_notebook("n.ipynb", nb)) == {"a": "static"}
 
 
+def test_python_operators_at_line_start_are_not_magics_and_indented_magic_keeps_block():
+    scan = scan_notebook("n.ipynb", notebook("import scipy\nok = (1\n      != 2)\nmsg = ('%s'\n       % ok)\n",
+                                             "import os\nfor f in os.listdir():\n    !echo $f\n"))
+    assert kinds(scan) == {"scipy": "static", "os": "static"} and not codes(scan)
+
+
+def test_load_ext_and_run_magics_become_imports():
+    scan = scan_notebook("n.ipynb", notebook("%load_ext autoreload\n%autoreload 2\n%load_ext tensorboard\n"
+                                             "%run -i helpers/prep.py --fast\n%run other.ipynb\n"))
+    assert kinds(scan) == {"tensorboard": "static", "helpers.prep": "static"}
+    assert scan.where(scan.imports[0].line) == "n.ipynb, ячейка 1, стр. 3"
+
+
+def test_pip_magic_stops_at_shell_operators():
+    scan = scan_notebook("n.ipynb", notebook(
+        "!pip install -q torch && python train.py\n!pip install numpy; ls\n!pip install scipy | tail -1\n"
+        "!pip install pandas > /dev/null 2>&1\n!uv pip install polars\n"))
+    assert scan.pip_hints == ("torch", "numpy", "scipy", "pandas", "polars")
+
+
+def test_windows_network_paths_are_absolute_not_data():
+    scan = scan_source("a.py", "p = r'\\\\lab-nas\\share\\data.csv'\n")
+    assert scan.data_refs == () and codes(scan) == {"absolute_path"}
+
+
+def test_paths_from_home_directory_are_flagged():
+    source = ("import os\nfrom pathlib import Path\nDATA = Path.home() / 'datasets'\n"
+              "CACHE = os.path.join(os.path.expanduser('~'), 'x')\nos.path.expanduser('~/y')\n")
+    details = [f.detail for f in scan_source("a.py", source).findings if f.code == "absolute_path"]
+    assert details == ["Path.home()", "os.path.expanduser('~')", "~/y"]
+
+
+@pytest.mark.parametrize("source, flagged", [
+    ("from random import shuffle as mix\nmix([1, 2])\n", True),
+    ("from numpy.random import rand\nx = rand(3)\n", True),
+    ("from random import seed, shuffle\nseed(1)\nshuffle([1, 2])\n", False),
+    ("from sklearn.utils import shuffle\nshuffle([1, 2])\n", False),
+], ids=["from-random", "from-numpy-random", "seeded", "other-module"])
+def test_random_functions_imported_by_name_are_checked_for_seed(source, flagged):
+    assert ("unseeded_random" in codes(scan_source("a.py", source))) is flagged
+
+
+@pytest.mark.parametrize("call, flagged", [
+    ("train_test_split(X, y, test_size=0.2)", True),
+    ("train_test_split(X, y, random_state=0)", False),
+    ("train_test_split(X, y, shuffle=False)", False),
+    ("np.random.seed(0)\ntrain_test_split(X, y)", False),
+], ids=["no-seed", "random-state", "no-shuffle", "global-seed"])
+def test_train_test_split_without_random_state_is_flagged(call, flagged):
+    source = f"import numpy as np\nfrom sklearn.model_selection import train_test_split\n{call}\n"
+    assert ("unseeded_split" in codes(scan_source("a.py", source))) is flagged
+
+
+def test_dynamic_import_name_given_by_keyword_is_recorded():
+    scan = scan_source("a.py", "import importlib\nm = importlib.import_module(name='sklearn')\n")
+    assert kinds(scan)["sklearn"] == "dynamic"
+
+
+def test_sys_path_changes_are_reported_once():
+    scan = scan_source("a.py", "import sys\nsys.path.append('lib')\nsys.path.insert(0, '..')\nsys.path[0]\n")
+    assert [(f.code, f.line) for f in scan.findings] == [("sys_path", 2)]
+
+
+def test_imports_inside_exec_strings_are_found_and_computed_exec_is_flagged():
+    source = "exec('import torch\\nfrom .x import y')\neval(\"__import__('yaml')\")\nexec(open('cfg.py').read())\n"
+    scan = scan_source("a.py", source)
+    assert kinds(scan) == {"torch": "dynamic", "yaml": "dynamic"}
+    assert [(f.code, f.detail) for f in scan.findings] == [
+        ("exec_import", "torch"), ("exec_import", "yaml"), ("exec_unresolved", "open('cfg.py').read()")]
+    assert codes(scan_source("a.py", "exec('import (')\neval(expr)\n")) == set()
+
+
 def test_scanning_never_executes_code(tmp_path: Path):
     marker = tmp_path / "pwned.txt"
     source = f"open({str(marker)!r}, 'w').write('x')\nimport os\nos.system('echo pwned')\n"

@@ -1,4 +1,5 @@
 import io
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -99,6 +100,37 @@ def test_directory_skips_junk_and_enforces_limits(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(intake, "MAX_FILES", 1)
     with pytest.raises(IntakeError, match="слишком большая"):
         read_directory(tmp_path)
+
+
+def test_zip_names_from_windows_and_macos_keep_cyrillic():
+    """Проводник Windows пишет кириллицу в cp866 без флага UTF-8, часть архиваторов — UTF-8 без флага,
+    а macOS раскладывает «й»/«ё» на букву и диакритику (NFD)."""
+    cp866, utf8 = "данные.csv".encode("cp866"), "опыт.xlsx".encode()
+    archive = make_zip({"main.py": b"", "A" * len(cp866): b"1", "B" * len(utf8): b"2",
+                        unicodedata.normalize("NFD", "серия_ё.csv"): b"3"})
+    archive = archive.replace(b"A" * len(cp866), cp866).replace(b"B" * len(utf8), utf8)
+    assert set(read_upload([("p.zip", archive)])) == {"main.py", "данные.csv", "опыт.xlsx", "серия_ё.csv"}
+
+
+def test_junk_does_not_count_towards_archive_limits(monkeypatch):
+    monkeypatch.setattr(intake, "MAX_FILES", 2)
+    monkeypatch.setattr(intake, "MAX_UNPACKED_BYTES", 10)
+    junk = {f".git/objects/{i}": b"x" * 100 for i in range(5)}
+    assert read_upload([("p.zip", make_zip({"main.py": b"x = 1", "._main.py": b"\x00\x05\x16\x07", **junk}))]) \
+        == {"main.py": b"x = 1"}
+
+
+def test_same_path_uploaded_twice_with_different_content_is_rejected():
+    assert read_upload([("main.py", b"x"), ("main.py", b"x")]) == {"main.py": b"x"}
+    with pytest.raises(IntakeError, match="дважды"):
+        read_upload([("p.zip", make_zip({"main.py": b"old"})), ("main.py", b"new")])
+
+
+@pytest.mark.parametrize("limit, value", [("MAX_FILES", 2), ("MAX_UNPACKED_BYTES", 10)])
+def test_limits_apply_to_all_uploads_together(monkeypatch, limit, value):
+    monkeypatch.setattr(intake, limit, value)
+    with pytest.raises(IntakeError, match="Загрузка слишком большая"):
+        read_upload([("a.py", b"x = 1"), ("p.zip", make_zip({"b.py": b"y = 2"})), ("c.py", b"z = 3")])
 
 
 def test_secrets_are_found_masked_and_redacted():
