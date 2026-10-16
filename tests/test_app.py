@@ -2,6 +2,7 @@
 
 import io
 import json
+import platform
 import re
 import zipfile
 from pathlib import Path
@@ -270,3 +271,24 @@ def test_preview_shows_every_generated_file_from_the_archive():
     assert "numpy" in app.tabs[1].code[0].value
     assert "Файлов в архиве" in texts(app.caption)
     assert not EMOJI.search(app.tabs[2].markdown[0].value)  # REPORT.md во вкладке тоже без ⚠
+
+
+def test_whole_folder_upload_keeps_subfolders_and_names_the_project():
+    app = start()
+    app.radio[0].set_value("Папка проекта").run()
+    assert app.file_uploader[0].accept_directory
+    app.file_uploader[0].set_value([("lab/main.py", b"from helpers.util import f\n", "text/x-python"),
+                                    ("lab/helpers/util.py", b"def f():\n    pass\n", "text/x-python")]).run()
+    assert not app.exception and app.text_input[1].value == "lab"
+    assert {m.label: m.value for m in app.metric}["Внешних пакетов"] == "0"  # helpers — модуль проекта, не PyPI
+
+
+def test_local_environment_versions_are_shown_only_with_consent():
+    app = open_demo("numpy_pandas_script")
+    assert "Версии из локальной среды" not in texts(app.markdown)
+    app.checkbox[0].check().run()
+    shown = texts(app.markdown)
+    assert f"Python {platform.python_version()}" in shown and "`pandas==" in shown
+    app = upload(("exp.py", b"import labtools_internal\n"))
+    app.checkbox[0].check().run()
+    assert "пакеты проекта здесь не установлены" in texts(app.markdown)

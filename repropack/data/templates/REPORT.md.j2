@@ -10,8 +10,16 @@
 |---|---|---|---|---|---|
 {% for d in dependencies %}| `{{ d.module }}` | {{ categories[d.category] }} | {{ d.package or "—" }} | {{ (d.version or "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %}, **подтвердить вручную**{% endif %} | {{ d.locations[:3]|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
 {% endfor %}
+{% if environment %}## Версии установленной среды
 
-## Предупреждения
+Прочитаны с разрешения пользователя там, где запускался repro-packer ({% for name, value in environment %}{{ name }} {{ value }}{{ ", " if not loop.last }}{% endfor %}). Это среда автора пакета, а не коллеги: точные версии у коллеги зафиксирует `verify.sh`.
+
+{% for d in local_versions %}- `{{ d.package }}{{ d.version }}`
+{% else %}- Ни один пакет проекта в этой среде не найден.
+{% endfor %}{% if not_installed %}
+Версия осталась неизвестной (пакета нет ни в файлах автора, ни в этой среде): {{ not_installed|join(", ") }}.
+{% endif %}
+{% endif %}## Предупреждения
 
 {% for issue in issues %}- [{{ levels[issue.level] }}] **{{ issue.title }}**{% if issue.where %} (`{{ issue.where }}`){% endif %} — {{ issue.detail }}
 {% else %}- Нет.

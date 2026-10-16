@@ -1,5 +1,6 @@
 import io
 import json
+import platform
 import runpy
 import subprocess
 import sys
@@ -11,8 +12,8 @@ import pytest
 from repropack.__main__ import main
 from repropack.analysis import analyze
 from repropack.intake import read_directory
-from repropack.packer import (PackOptions, Requirement, build_zip, default_requirements, render_package,
-                              requirements_text)
+from repropack.packer import (TREE_LIMIT, PackOptions, Requirement, build_zip, default_requirements, package_tree,
+                              render_package, requirements_text)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
@@ -216,3 +217,37 @@ def test_python_dash_m_runs_the_cli(tmp_path: Path, monkeypatch):
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("repropack", run_name="__main__")
     assert exit_info.value.code == 0 and output.exists()
+
+
+def test_readme_shows_package_structure_with_entry_point_and_data():
+    archive, root = pack("numpy_pandas_script")
+    readme = archive.read(f"{root}/README.md").decode()
+    assert "## Структура пакета" in readme and f"{root}/\n├── .dockerignore" in readme
+    tree = readme.split("```text\n", 1)[1].split("```", 1)[0]
+    assert "└── project/" in tree and "← код и данные автора" in tree
+    assert any(line.startswith("    ├── main.py ") and line.endswith("← точка входа") for line in tree.splitlines())
+    assert any(line.startswith("        └── measurements.csv") and line.endswith("← входные данные")
+               for line in tree.splitlines())
+    assert len({line.index("←") for line in tree.splitlines() if "←" in line}) == 1  # пояснения в одну колонку
+
+
+def test_tree_of_a_big_project_is_cut_with_a_note():
+    lines = package_tree("p-repro", [f"project/m{i:02}.py" for i in range(50)], {}).splitlines()
+    assert len(lines) == 1 + TREE_LIMIT + 1 and lines[-1] == "… и ещё 11 — полный состав в архиве"
+
+
+def test_report_lists_installed_versions_only_with_consent():
+    files = {"main.py": b"import jinja2, labtools_internal\n"}
+
+    def rendered(consent: bool) -> dict[str, str]:
+        analysis = analyze(files, use_local_env=consent)
+        return render_package(analysis, PackOptions("p", "main.py", "3.11", default_requirements(analysis)), "now")
+
+    with_consent = rendered(True)
+    section = with_consent["REPORT.md"].split("## Версии установленной среды")[1].split("## Предупреждения")[0]
+    assert f"Python {platform.python_version()}" in section and "`Jinja2==" in section
+    assert "Версия осталась неизвестной" in section and "labtools_internal" in section
+    assert json.loads(with_consent["repro.json"])["local_environment"]["Python"] == platform.python_version()
+    without = rendered(False)
+    assert "Версии установленной среды" not in without["REPORT.md"]
+    assert json.loads(without["repro.json"])["local_environment"] == {}

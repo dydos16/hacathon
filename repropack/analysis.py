@@ -1,5 +1,6 @@
 """Сводный анализ проекта: зависимости + список предупреждений + кандидаты точки входа."""
 
+import platform
 import posixpath
 import re
 from dataclasses import dataclass
@@ -43,6 +44,12 @@ class Analysis:
     data_found: tuple[str, ...]
     data_missing: tuple[tuple[str, str], ...]
     hygiene: tuple[tuple[str, bool], ...]
+    environment: tuple[tuple[str, str], ...] = ()  # среда, где запущен анализ; только с согласия пользователя
+
+
+def local_environment() -> tuple[tuple[str, str], ...]:
+    """Версия Python и ОС этой машины — для отчёта о среде. Путей и имени пользователя здесь нет."""
+    return ("Python", platform.python_version()), ("ОС", platform.platform(terse=True))
 
 
 def decode(data: bytes) -> str:
@@ -362,4 +369,5 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
         entry_candidates=_entry_candidates(scans), suggested_python=python, python_reason=python_reason,
         secret_files=secret_files, secrets=secrets, data_found=tuple(data_found),
         data_missing=tuple(data_missing), hygiene=hygiene,
+        environment=local_environment() if use_local_env else (),
     )

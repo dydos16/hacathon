@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import __version__
 from .analysis import Analysis, decode
-from .classify import PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
+from .classify import LOCAL_ENV, PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
 from .secrets import env_names, redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
@@ -35,6 +35,16 @@ SYSTEM_PACKAGES = {
 }
 # Docker отправляет демону всю папку: окружение и логи verify.sh не нужны и весят сотни мегабайт
 DOCKERIGNORE = ".repro-venv/\nverify_log.txt\nrun_output.txt\n"
+TEMPLATED = ("README.md", "REPORT.md", "Dockerfile", "verify.sh", "verify.ps1")
+# Корень пакета для дерева в README: файл → зачем он коллеге
+PACKAGE_FILES = {
+    "README.md": "как установить и запустить", "requirements.txt": "зависимости с пояснением к каждой строке",
+    "REPORT.md": "что определить не удалось", "repro.json": "отчёт в машиночитаемом виде",
+    "Dockerfile": "запуск в контейнере", ".dockerignore": "что не копировать в образ",
+    "verify.sh": "проверка в чистом окружении: Linux, macOS", "verify.ps1": "проверка в чистом окружении: Windows",
+}
+TREE_NOTE_COLUMN = 40  # символов: пояснения в дереве выровнены в одну колонку
+TREE_LIMIT = 40  # строк: у большого проекта дерево обрезается, полный состав — в самом архиве
 ENV_TEMPLATE_HEADER = ("# Создано repro-packer вместо исключённого файла с секретами: значения автора удалены.\n"
                        "# Впишите свои значения и переименуйте файл в .env\n")
 
@@ -134,6 +144,39 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
 
 
+def _tree_lines(node: dict, parent: str, notes: dict[str, str]) -> list[tuple[str, str]]:
+    """Строки дерева с пояснениями: сначала файлы, потом папки, по алфавиту."""
+    lines = []
+    items = sorted(node.items(), key=lambda item: (bool(item[1]), item[0].lower()))
+    for number, (name, children) in enumerate(items, start=1):
+        path, last = posixpath.join(parent, name), number == len(items)
+        lines.append((f"{'└── ' if last else '├── '}{name}{'/' if children else ''}", notes.get(path, "")))
+        lines += [(("    " if last else "│   ") + text, note) for text, note in _tree_lines(children, path, notes)]
+    return lines
+
+
+def package_tree(root: str, paths: list[str], notes: dict[str, str]) -> str:
+    """Структура папок пакета для README: коллега сразу видит, что где лежит."""
+    tree: dict = {}
+    for path in paths:
+        node = tree
+        for part in path.split("/"):
+            node = node.setdefault(part, {})
+    lines = [f"{text:<{TREE_NOTE_COLUMN}} ← {note}" if note else text for text, note in _tree_lines(tree, "", notes)]
+    if len(lines) > TREE_LIMIT:
+        lines = [*lines[:TREE_LIMIT], f"… и ещё {len(lines) - TREE_LIMIT} — полный состав в архиве"]
+    return "\n".join([f"{root}/", *lines])
+
+
+def _package_tree(analysis: Analysis, options: PackOptions) -> str:
+    sources = [p for p in analysis.files if p not in analysis.secret_files] + list(env_templates(analysis))
+    notes = {**PACKAGE_FILES, "project": "код и данные автора", f"project/{options.entry_point}": "точка входа",
+             **{f"project/{p}": "входные данные" for p in analysis.data_found},
+             **{f"project/{p}": "имена переменных без значений — впишите свои" for p in env_templates(analysis)}}
+    return package_tree(f"{slugify(options.project_name)}-repro",
+                        [*PACKAGE_FILES, *(f"project/{p}" for p in sources)], notes)
+
+
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
     system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs
@@ -142,6 +185,7 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
     run_log = f"-- Запуск: python {run_tail}"
     return {
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
+        "tree": _package_tree(analysis, options),
         "python_version": options.python_version, "python_reason": analysis.python_reason,
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
         "system_packages": system, "system_apt": " ".join(dict.fromkeys(" ".join(a for _, a in system).split())),
@@ -151,7 +195,9 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
         "excluded": analysis.secret_files, "redacted": bool(analysis.secrets), "env_templates": env_templates(analysis),
         "key_issues": [i for i in analysis.issues if i.level != "info"], "issues": analysis.issues,
-        "dependencies": analysis.dependencies, "hygiene": analysis.hygiene,
+        "dependencies": analysis.dependencies, "hygiene": analysis.hygiene, "environment": analysis.environment,
+        "local_versions": [d for d in analysis.dependencies if d.version_source == LOCAL_ENV],
+        "not_installed": [d.package for d in packaged_dependencies(analysis) if not d.version],
         "categories": CATEGORIES, "levels": LEVELS,
         "counts": {lvl: sum(i.level == lvl for i in analysis.issues) for lvl in LEVELS},
     }
@@ -166,6 +212,7 @@ def _manifest(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement,
         "issues": [asdict(i) for i in analysis.issues],
         "excluded_files": list(analysis.secret_files),
         "redacted_files": sorted({h.path for h in analysis.secrets}),
+        "local_environment": dict(analysis.environment),
     }, ensure_ascii=False, indent=2)
 
 
@@ -177,7 +224,7 @@ def render_package(analysis: Analysis, options: PackOptions, created: str | None
     reqs = _with_notebook_runners(options)
     ctx = _context(analysis, options, reqs, created)
     rendered = {name: TEMPLATES.get_template(f"{name}.j2").render(ctx)
-                for name in ("README.md", "REPORT.md", "Dockerfile", "verify.sh", "verify.ps1")}
+                for name in TEMPLATED}
     return {**rendered, "requirements.txt": requirements_text(reqs, created), ".dockerignore": DOCKERIGNORE,
             "repro.json": _manifest(analysis, options, reqs, ctx)}
 

@@ -174,3 +174,14 @@ def test_redaction_keeps_the_original_file_encoding():
     original = f"# комментарий\nAPI_KEY = '{FAKE_KEY}'\n".encode("cp1251")
     assert redact_bytes(original) == original.replace(FAKE_KEY.encode(), b"<REDACTED>")
     assert redact_bytes(f"ключ = '{FAKE_KEY}'".encode()) == "ключ = '<REDACTED>'".encode()
+
+
+def test_uploaded_folder_keeps_subfolders_and_leaves_inner_zip_alone():
+    files = read_upload([("lab/main.py", b"x"), ("lab/helpers/util.py", b"y"), ("lab/data.zip", b"z"),
+                         ("lab/.git/HEAD", b"h")], keep_paths=True)
+    assert files == {"main.py": b"x", "helpers/util.py": b"y", "data.zip": b"z"}
+
+
+def test_uploaded_folder_still_rejects_paths_outside_it():
+    with pytest.raises(IntakeError, match="Небезопасный путь"):
+        read_upload([("lab/main.py", b""), ("lab/../../etc/evil.py", b"")], keep_paths=True)

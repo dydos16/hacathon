@@ -50,6 +50,7 @@ VERSION_SPEC = re.compile(rf"^\s*(?:(?:{_OPERATOR}\s*)?{_VERSION}\s*(?:,\s*{_OPE
 PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
 DECLARED_ONLY_NOTE = "объявлено, но import не найден (плагин, бэкенд или лишняя зависимость)"
 CONDA_ONLY_NOTE = "пакет conda без import в коде — в requirements.txt не включён"
+LOCAL_ENV = "локальная среда"  # имя или версия прочитаны из среды, где запущен repro-packer
 NOT_ON_PYPI = "не с PyPI"  # статус модуля, который из PyPI не поставить
 MAPPING_FILE = Path(__file__).parent / "data" / "module_to_package.json"
 
@@ -359,7 +360,7 @@ def _resolve_package(module: str, declared: dict[str, Declared], use_local_env: 
     if normalize(module) in declared:
         return {"package": declared[normalize(module)].name, "status": "объявлено в проекте"}
     if use_local_env and (dist := _local_env_distribution(module)):
-        return {"package": dist, "status": "локальная среда"}
+        return {"package": dist, "status": LOCAL_ENV}
     return {"package": module, "status": "догадка", "needs_confirmation": True,
             "note": "нет в справочнике: это пакет PyPI с другим именем или забытый локальный модуль?"}
 
@@ -371,7 +372,7 @@ def _version(package: str, declared: dict[str, Declared], use_local_env: bool,
         if (found := declared.get(normalize(name))) and found.spec:
             return found.spec, found.source, found.note
     if use_local_env and package and (version := _local_env_version(package)):
-        return f"=={version}", "локальная среда", ""
+        return f"=={version}", LOCAL_ENV, ""
     return "", "", ""
 
 

@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze, is_auxiliary
-from repropack.classify import Dependency
+from repropack.classify import LOCAL_ENV, Dependency
 from repropack.intake import IntakeError, read_directory, read_upload
 from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
                               default_requirements, packaged_dependencies, slugify)
@@ -21,14 +21,15 @@ EXAMPLES = {
     "messy_lab_project": "«Сырой» проект: секреты, динамические импорты, пропавшие данные",
 }
 EXAMPLES_DIR = Path(__file__).parent / "examples"
+SOURCES = ["Файлы или ZIP", "Папка проекта", "Демо-проект"]
 PYTHON_VERSIONS = ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
 # Уровень → заголовок группы и цвет текста (цвет вместо значков: красный — только для критичного)
 LEVEL_LABELS = {"high": ("Критично", "red"), "medium": ("Нужно решение", "orange"), "info": ("К сведению", "gray")}
 ISSUES_BEFORE_SCROLL = 8
 ISSUE_LIST_HEIGHT = 420  # px: длинный список прокручивается внутри своей группы
 START_SCREEN = (
-    ("Что загрузить", "Файлы `.py` и `.ipynb` или ZIP всего проекта, до 20 МБ. Данные и `requirements.txt` "
-                      "можно приложить рядом."),
+    ("Что загрузить", "Папку проекта целиком, ZIP или отдельные файлы `.py` и `.ipynb` (до 20 МБ каждый). "
+                      "Данные и `requirements.txt` можно приложить рядом."),
     ("Что получите", "ZIP: `requirements.txt` с пояснением к каждой строке, README с командами, Dockerfile, "
                      "`verify.sh` / `verify.ps1` и отчёт о том, что определить не удалось."),
     ("Код не запускается", "Только статический разбор (`ast`) в памяти, на диск ничего не сохраняется. "
@@ -61,17 +62,21 @@ def cached_analysis(files: dict[str, bytes], use_local_env: bool) -> Analysis:
 
 
 def choose_source() -> tuple[dict[str, bytes], str] | None:
-    mode = st.radio("Источник", ["Загрузить свой проект", "Демо-проект"], horizontal=True,
-                    label_visibility="collapsed")
+    """Файлы или ZIP, папка целиком (подпапки сохраняются) или демо-проект → (файлы, имя проекта)."""
+    mode = st.radio("Источник", SOURCES, horizontal=True, label_visibility="collapsed")
     if mode == "Демо-проект":
         name = st.selectbox("Демо-проект", EXAMPLES, format_func=lambda k: f"{k} — {EXAMPLES[k]}")
         return read_directory(EXAMPLES_DIR / name), name
-    uploads = st.file_uploader("Файлы проекта: .py, .ipynb, ZIP-архив, данные и requirements",
-                               accept_multiple_files=True)
+    folder = mode == "Папка проекта"
+    uploads = st.file_uploader("Папка проекта: подпапки сохранятся, .git и .venv пропускаются" if folder
+                               else "Файлы проекта: .py, .ipynb, ZIP-архив, данные и requirements",
+                               accept_multiple_files="directory" if folder else True)
     if not uploads:
         return None
-    name = Path(uploads[0].name).stem if len(uploads) == 1 else "project"
-    return read_upload([(u.name, u.getvalue()) for u in uploads]), name
+    files = read_upload([(u.name, u.getvalue()) for u in uploads], keep_paths=folder)
+    if folder:  # имя загруженного файла — путь внутри папки, начиная с имени самой папки
+        return files, PurePosixPath(uploads[0].name).parts[0]
+    return files, Path(uploads[0].name).stem if len(uploads) == 1 else "project"
 
 
 def show_start_screen() -> None:
@@ -122,6 +127,15 @@ def package_summary(analysis: Analysis) -> str:
     return "  \n".join(f"**{label}:** {', '.join(f'`{p}`' for p in items)}" for label, items in facts if items)
 
 
+def local_env_summary(analysis: Analysis) -> str:
+    """С галочкой «версии из среды»: где и какие версии прочитаны — видно без открытия REPORT.md."""
+    if not analysis.environment:
+        return ""
+    where = ", ".join(f"{name} {value}" for name, value in analysis.environment)
+    read = [f"`{d.package}{d.version}`" for d in analysis.dependencies if d.version_source == LOCAL_ENV]
+    return f"**Версии из локальной среды ({where}):** {', '.join(read) or 'пакеты проекта здесь не установлены'}"
+
+
 def show_summary(analysis: Analysis, options: PackOptions, package: bytes | None, error: str) -> None:
     """Итог наверху страницы: вердикт, числа и скачивание — без прокрутки к концу."""
     show_verdict(analysis)
@@ -136,7 +150,7 @@ def show_summary(analysis: Analysis, options: PackOptions, package: bytes | None
         st.download_button("requirements.txt", generated["requirements.txt"], file_name="requirements.txt",
                            mime="text/plain")
         st.download_button("REPORT.md", generated["REPORT.md"], file_name="REPORT.md", mime="text/markdown")
-    if summary := package_summary(analysis):
+    if summary := "  \n".join(filter(None, (package_summary(analysis), local_env_summary(analysis)))):
         st.markdown(summary)
     notes = ["У коллеги: распакуйте архив и запустите `sh verify.sh` (Windows: `verify.ps1`). Итог — в конце "
              "`verify_log.txt`, точные версии — в `requirements.lock.txt`."]

@@ -16,6 +16,14 @@ powershell -ExecutionPolicy Bypass -File verify.ps1   # Windows
 Скрипт создаёт чистое окружение `.repro-venv`, ставит зависимости, сохраняет точные версии
 в `requirements.lock.txt`, запускает проект и пишет итог в `verify_log.txt`.
 
+## Структура пакета
+
+```text
+{{ tree }}
+```
+
+После проверки (`sh verify.sh`) рядом появятся `.repro-venv/`, `requirements.lock.txt` и `verify_log.txt`.
+
 ## Требования
 
 - Python **{{ python_version }}** ({{ python_reason }})

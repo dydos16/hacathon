@@ -107,16 +107,21 @@ def _merge(files: dict[str, bytes], added: dict[str, bytes]) -> dict[str, bytes]
     return merged
 
 
-def read_upload(uploads: list[tuple[str, bytes]]) -> dict[str, bytes]:
-    """Принимает список (имя, содержимое): ZIP раскрывается, остальные файлы кладутся в корень."""
+def read_upload(uploads: list[tuple[str, bytes]], keep_paths: bool = False) -> dict[str, bytes]:
+    """Принимает список (имя, содержимое): ZIP раскрывается, остальные файлы кладутся в корень.
+
+    keep_paths — загружена папка целиком: имя — путь внутри неё («proj/lib/x.py»), подпапки сохраняются,
+    общая папка верхнего уровня срезается, а ZIP внутри папки остаётся обычным файлом."""
     files: dict[str, bytes] = {}
     for name, data in uploads:
-        if name.lower().endswith(".zip"):
+        if name.lower().endswith(".zip") and not keep_paths:
             files = _merge(files, read_zip(data))
             continue
-        path = _safe_path(PurePosixPath(name.replace("\\", "/")).name)
+        path = _safe_path(name if keep_paths else PurePosixPath(name.replace("\\", "/")).name)
         if path is not None:
             files = _merge(files, {path: data})
+    if keep_paths:
+        files = _strip_common_root(files)
     if not any(p.endswith((".py", ".ipynb")) for p in files):
         raise IntakeError("Не найдено ни одного файла .py или .ipynb")
     return files
