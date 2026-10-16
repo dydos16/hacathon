@@ -85,9 +85,13 @@ messy-lab-project-repro/
 ## Как мы проверяли корректность
 
 ```bash
-pytest --cov                                            # 238 тестов, ~9 с, покрытие 100 % строк и ветвлений
+pytest --cov                                            # 243 теста, ~10 с, покрытие 100 % строк и ветвлений
 REPRO_NETWORK_TESTS=1 pytest tests/test_clean_venv.py   # + реальная установка numpy/pandas из PyPI
+pip install -e ".[e2e]" && python -m playwright install chromium
+REPRO_BROWSER_TESTS=1 pytest tests/test_site.py         # сайт в настоящем браузере (Chromium)
 ```
+
+- **CI на трёх ОС:** GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) на каждый пуш гоняет все тесты на Windows, Linux и macOS с Python 3.11, 3.12 и 3.13, включая сквозной запуск пакета (`verify.ps1` на Windows, `verify.sh` на Linux/macOS) и сайт в браузере на всех трёх ОС.
 
 - **Сквозная воспроизводимость:** пакеты `local_module_project` и `numpy_pandas_script` распаковываются, `verify.sh` создаёт чистый venv, ставит зависимости и запускает код. Тест проверяет вывод программы и строку `РЕЗУЛЬТАТ: OK`.
 - **Точность классификации:** тесты на stdlib/локальные/внешние модули, переименованные пакеты, неоднозначные и неизвестные модули, версии из requirements/pyproject/environment.yml, неявные зависимости, удалённые модули.
