@@ -83,13 +83,13 @@ def test_start_screen_says_what_to_upload_what_comes_out_and_that_code_is_not_ru
 def test_messy_demo_numbers_fit_in_one_row_of_metrics():
     app = open_demo("messy_lab_project")
     assert {m.label: m.value for m in app.metric} == {
-        "Файлов": "7", "Внешних пакетов": "12", "Критичных проблем": "6", "Нужно подтвердить": "4"}
+        "Файлов": "7", "Внешних пакетов": "12", "Критичных проблем": "5", "Нужно подтвердить": "4"}
     assert any(e.label.startswith("Стандартная библиотека: 4 · локальные модули: 1") for e in app.expander)
 
 
 def test_each_issue_shows_where_it_is_and_what_to_do():
     app = open_demo("messy_lab_project")
-    assert {"Критично: 6", "Нужно решение: 5", "К сведению: 6"} <= {e.label for e in app.expander}
+    assert {"Критично: 5", "Нужно решение: 6", "К сведению: 6"} <= {e.label for e in app.expander}
     shown = texts(app.markdown)
     assert "**Абсолютный путь «/Users/ivan/lab/raw_2024.csv»** · `analysis.py:24`" in shown
     assert "→ такой путь есть только на компьютере автора — замените на относительный" in shown
@@ -99,7 +99,7 @@ def test_long_issue_list_scrolls_inside_its_group():
     many_missing = "\n".join(f"open('missing_{i}.csv')" for i in range(12)).encode()
     group = widget(upload(("many.py", many_missing)).expander, "Критично: 12")
     assert group.children[0].proto.height_config.pixel_height > 0
-    short = widget(open_demo("messy_lab_project").expander, "Критично: 6")
+    short = widget(open_demo("messy_lab_project").expander, "Критично: 5")
     assert not short.children[0].proto.height_config.pixel_height
 
 
