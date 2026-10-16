@@ -32,6 +32,40 @@ jobs:
       # Покрытие (fail_under = 100) считаем на одной конфигурации: на остальных часть веток для других ОС пропускается
       - run: python -m pytest -v ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.12' && '--cov' || '' }}
 
+  lowest:
+    # Самые низкие версии, которые разрешает pyproject.toml: обещание «streamlit>=…» должно быть правдой
+    name: tests · минимальные версии зависимостей · Python 3.11
+    runs-on: ubuntu-latest
+    env:
+      REPRO_NETWORK_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install uv
+      - run: uv pip install --system --resolution lowest-direct -e ".[dev]"
+      - run: python -c "import streamlit, jinja2, pytest; print(streamlit.__version__, jinja2.__version__, pytest.__version__)"
+      - run: python -m pytest -v
+
+  docker:
+    # Сгенерированный Dockerfile собирается, а проект в образе запускается (numpy/pandas и OpenCV с apt-get)
+    name: Docker-образ пакета · ubuntu-latest
+    runs-on: ubuntu-latest
+    env:
+      REPRO_DOCKER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      # Базовый образ заранее и с повтором: сбой сети при скачивании с Docker Hub — не ошибка Dockerfile
+      - run: for i in 1 2 3; do docker pull python:3.11-slim && break; sleep 15; done
+      - run: python -m pytest tests/test_docker.py -v
+
   site:
     name: site in browser · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
