@@ -12,7 +12,7 @@ from functools import cache
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 
-from .scanner import COMPLEXITY_ERRORS, SYNTAX_ERRORS, FileScan
+from .scanner import COMPLEXITY_ERRORS, MAX_CODE_CHARS, SYNTAX_ERRORS, FileScan
 
 STDLIB = frozenset(sys.stdlib_module_names)
 PYTHON2 = (2, 7)
@@ -41,7 +41,8 @@ PANDAS_LIKE = {"pandas", "geopandas", "modin", "dask"}  # у polars и друг�
 NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 REQ_LINE = re.compile(rf"^({NAME})\s*(\[[^\]]*\])?\s*([^;]*)")
 CONDA_SPEC = re.compile(rf"^(?:[\w.-]+::)?({NAME})\s*(==|>=|<=|!=|~=|=|>|<)?\s*([^\s#]*)")
-POETRY_RANGE = re.compile(r"([\^~])\s*(\d+(?:\.\d+)*)")
+# Номера версий короткие: длинное число роняет int() (лимит 4300 цифр) и весь анализ
+POETRY_RANGE = re.compile(r"([\^~])\s*(\d{1,6}(?:\.\d{1,6})*)")
 _OPERATOR = r"(?:==|!=|<=|>=|~=|<|>)"
 _VERSION = r"\d[A-Za-z0-9.*+!_-]*"
 # Версия для requirements.txt: «1.26.4», «>=2.0», «>=1.2,<2» или пусто. Шаблон совместим с JavaScript:
@@ -212,6 +213,8 @@ def _setup_arguments(tree: ast.AST) -> dict[str, ast.expr]:
 
 def _from_setup_py(text: str, source: str) -> tuple[list[Declared], str]:
     """setup.py не выполняется: из вызова setup(...) берутся только списки и строки, записанные буквально."""
+    if len(text) > MAX_CODE_CHARS:  # такой setup.py не разбираем: память ast растёт примерно на 120 МБ на мегабайт
+        raise ValueError(f"setup.py слишком большой для разбора: больше {MAX_CODE_CHARS // 1_000_000} МБ")
     try:
         arguments = _setup_arguments(ast.parse(text))
     except (*SYNTAX_ERRORS, *COMPLEXITY_ERRORS):
@@ -272,18 +275,24 @@ READERS = {
 }
 
 
-def _declared_items(files: dict[str, bytes]) -> tuple[list[Declared], str]:
+def _declared_items(files: dict[str, bytes]) -> tuple[list[Declared], str, list[str]]:
+    """Зависимости и версия Python из всех файлов; файлы, которые не удалось разобрать, возвращаются отдельно."""
     items: list[Declared] = []
     python = ""
+    unreadable: list[str] = []
     for path, data in sorted(files.items()):  # порядок файлов в ZIP не должен влиять на результат
         name = PurePosixPath(path).name
         if name.startswith("requirements") and name.endswith(".txt"):
             items += _from_lines(_text(data).splitlines(), path)
         elif name in READERS:
             read, exact = READERS[name]
-            found, hint = read(_text(data), path)
+            try:
+                found, hint = read(_text(data), path)
+            except ValueError:  # одна битая запись не должна валить анализ всего проекта
+                unreadable.append(path)
+                continue
             items, python = items + found, (hint or python) if exact else (python or hint)
-    return items, python
+    return items, python, unreadable
 
 
 def _pinned(spec: str) -> bool:
@@ -306,11 +315,17 @@ def _merge_declared(items: list[Declared]) -> dict[str, Declared]:
     return {key: _merge(group) for key, group in groups.items()}
 
 
+def parse_declared_checked(files: dict[str, bytes]) -> tuple[dict[str, Declared], str, tuple[str, ...]]:
+    """То же, что parse_declared, плюс пути файлов, которые не удалось разобрать."""
+    items, python, unreadable = _declared_items(files)
+    return _merge_declared(items), python, tuple(unreadable)
+
+
 def parse_declared(files: dict[str, bytes]) -> tuple[dict[str, Declared], str]:
     """Зависимости, уже объявленные в проекте: requirements*.txt, pyproject.toml, setup.cfg, setup.py,
     Pipfile, environment.yml. Файлы только читаются, setup.py разбирается через ast."""
-    items, python = _declared_items(files)
-    return _merge_declared(items), python
+    declared, python, _ = parse_declared_checked(files)
+    return declared, python
 
 
 def _module_exists(prefix: str, top: str, files: dict[str, bytes]) -> bool:
@@ -460,7 +475,7 @@ def _declared_only(declared: dict[str, Declared], packages: set[str]) -> list[De
 
 
 def classify(scans: list[FileScan], files: dict[str, bytes], use_local_env: bool = False) -> list[Dependency]:
-    items, _ = _declared_items(files)
+    items, _, _ = _declared_items(files)
     hints = [Declared(*req, f"{scan.path} (!pip install)")
              for scan in scans for req in map(_requirement, scan.pip_hints) if req]
     declared = _merge_declared(items + hints)  # при равной точности версия из файлов автора важнее !pip install

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
-                       parse_declared)
+                       parse_declared_checked)
 from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source, skipped_scan
 from .secrets import SecretHit, env_names, file_text, find_secrets, is_secret_file, redact
 
@@ -359,10 +359,16 @@ def _merge_repeats(issues: list[Issue]) -> list[Issue]:
     return merged
 
 
+def _unreadable_declared(paths: tuple[str, ...]) -> list[Issue]:
+    return [Issue("medium", f"Файл «{path}» не разобран",
+                  "в нём некорректная или слишком большая запись зависимостей; проверьте её вручную в таблице", path)
+            for path in paths]
+
+
 def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     scans = _scan_all(files)
     deps = classify(scans, files, use_local_env)
-    declared, python_hint = parse_declared(files)
+    declared, python_hint, unreadable = parse_declared_checked(files)
     python, python_reason, python_issues = _suggest_python(scans, deps, python_hint)
     secret_files = tuple(p for p in files if is_secret_file(p))
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
@@ -372,6 +378,7 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     hygiene = _hygiene(files, data_found, bool(declared))
 
     issues = python_issues + _finding_issues(scans) + _relative_import_issues(scans, files)
+    issues += _unreadable_declared(unreadable)
     issues += _dependency_issues(deps) + _summary_issues(deps) + _secret_issues(files, secret_files, secrets)
     issues += [Issue("high", f"Файл данных «{ref}» не найден",
                      "приложите пример данных или опишите в README, где его взять "

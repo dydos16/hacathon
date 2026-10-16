@@ -40,6 +40,7 @@ COMPLEXITY_ERRORS = (RecursionError, MemoryError)
 # Логическая строка длиннее — сгенерированная формула. Если файл целиком не разобрался (лимит рекурсии парсера:
 # на Windows и в Python 3.11 он ниже), пропускаем только такие строки, а не весь файл с его импортами.
 LONG_STATEMENT_TOKENS = 500
+MAX_LINE_CHARS = 2_000  # физическая строка длиннее — почти всегда сгенерированный код; ast на ней тратит память квадратично
 MAX_CODE_CHARS = 1_000_000  # один файл; настоящие скрипты на порядки меньше, а мегабайт кода — сотни МБ памяти ast
 LAYOUT_TOKENS = {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
 # !pip, %pip, !pip3, !python -m pip, !{sys.executable} -m pip, !uv pip
@@ -349,6 +350,10 @@ def _blank_long_statements(text: str) -> tuple[str, list[int]]:
 
 
 def _parse(path: str, text: str) -> tuple[ast.AST, list[Finding]]:
+    if any(len(line) > MAX_LINE_CHARS for line in text.splitlines()):  # длинные выражения до разбора, а не после
+        reduced, blanked = _blank_long_statements(text)
+        if blanked:
+            return ast.parse(reduced, filename=path), [Finding("long_statement", line, "") for line in blanked]
     try:
         return ast.parse(text, filename=path), []
     except COMPLEXITY_ERRORS:

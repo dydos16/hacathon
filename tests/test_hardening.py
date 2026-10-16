@@ -82,3 +82,73 @@ def test_docker_context_leaves_secret_files_out_but_keeps_env_templates():
         assert pattern in lines, pattern
     assert "!**/.env.example" in lines
     assert lines.index("!**/.env.example") > lines.index("**/.env*")  # в .dockerignore побеждает последнее правило
+
+
+def test_huge_version_number_in_poetry_does_not_break_analysis():
+    """Пункт 6: длинное число в версии Poetry роняло весь анализ: int() не принимает строку длиннее 4300 цифр."""
+    huge = "^" + "1" * 5000
+    analysis = analyze({"main.py": b"import numpy\n",
+                        "pyproject.toml": f'[tool.poetry.dependencies]\nnumpy = "{huge}"\n'.encode()})
+    assert any(d.module == "numpy" for d in analysis.dependencies)
+
+
+def test_declared_file_that_cannot_be_read_becomes_an_issue_not_a_crash(monkeypatch):
+    """Пункт 6: один нечитаемый файл зависимостей не должен валить анализ всего проекта."""
+    from repropack import classify
+
+    def broken(text, source):
+        raise ValueError("некорректная запись")
+
+    monkeypatch.setitem(classify.READERS, "pyproject.toml", (broken, False))
+    analysis = analyze({"main.py": b"import os\n", "pyproject.toml": b"[project]\n"})
+    assert any(i.title == "Файл «pyproject.toml» не разобран" and i.level == "medium" for i in analysis.issues)
+
+
+def test_oversized_setup_py_is_refused_before_ast_parse():
+    """Пункт 7: setup.py на мегабайты разбирался ast без лимита: память росла примерно на 120 МБ на мегабайт."""
+    from repropack import classify
+    from repropack.scanner import MAX_CODE_CHARS
+
+    big = "setup(install_requires=[" + ",".join(f"'p{i}'" for i in range(MAX_CODE_CHARS // 4)) + "])\n"
+    with pytest.raises(ValueError, match="слишком большой"):
+        classify._from_setup_py(big, "setup.py")
+
+
+def test_long_dotted_import_line_is_skipped_as_long_statement():
+    """Пункт 7: одна строка с 20 000 частей имени занимала память и время квадратично, а теперь пропускается."""
+    from repropack.scanner import scan_source
+
+    scan = scan_source("a.py", "import " + ".".join(["a"] * 20_000) + "\n")
+    assert [f.code for f in scan.findings] == ["long_statement"]
+    assert scan.imports == ()
+
+
+def test_long_string_literal_is_still_parsed_normally():
+    """Длинная строка-данные — одна лексема, её не нужно пропускать: импорты рядом должны находиться."""
+    from repropack.scanner import scan_source
+
+    scan = scan_source("a.py", "x = '" + "a" * 5000 + "'\nimport os\n")
+    assert scan.findings == () and [ref.module for ref in scan.imports] == ["os"]
+
+
+def test_multiline_formula_that_overflows_the_parser_is_skipped():
+    """Пункт 7: формула на сотнях тысяч коротких строк не длинная по символам, но парсер на ней падает — пропускаем её."""
+    from repropack.scanner import scan_source
+
+    formula = "x = (\n" + " +\n".join(["a"] * 100_000) + ")\n"
+    scan = scan_source("f.py", "import numpy\n" + formula)
+    assert [f.code for f in scan.findings] == ["long_statement"]
+    assert [ref.module for ref in scan.imports] == ["numpy"]
+
+
+def test_expression_text_falls_back_when_unparse_overflows(monkeypatch):
+    """Глубокое выражение не должно валить отчёт при печати его текста: вместо текста — пометка."""
+    import ast
+
+    from repropack import scanner
+
+    def overflow(node):
+        raise RecursionError
+
+    monkeypatch.setattr(scanner.ast, "unparse", overflow)
+    assert scanner._source(ast.parse("a", mode="eval").body) == "(слишком глубокое выражение)"
