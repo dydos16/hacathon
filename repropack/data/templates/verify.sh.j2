@@ -19,7 +19,7 @@ log "-- Установка зависимостей из requirements.txt"
 "$VPY" -m pip freeze > requirements.lock.txt
 log "-- Точные версии сохранены в requirements.lock.txt"
 
-log {{ run_log_sh }}
+log "-- Запуск: {{ run_command }}"
 cd project || exit 1
 "../$VPY" {{ run_tail }} > ../run_output.txt 2>&1
 code=$?

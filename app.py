@@ -10,8 +10,8 @@ import streamlit as st
 
 from repropack.analysis import Analysis, analyze
 from repropack.intake import IntakeError, read_directory, read_upload
-from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
-                              default_requirements, packaged_dependencies, slugify)
+from repropack.packer import (CATEGORIES, PackOptions, Requirement, build_zip, default_requirements,
+                              packaged_dependencies, render_package, slugify)
 
 EXAMPLES = {
     "numpy_pandas_script": "Скрипт с numpy/pandas и CSV-данными",
@@ -23,19 +23,6 @@ PYTHON_VERSIONS = ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
 LEVEL_VIEW = {"high": (st.error, "Критично"), "medium": (st.warning, "Нужно решение"), "info": (st.info, "К сведению")}
 EDITABLE = ["Включить", "Пакет PyPI", "Версия", "Подтверждено"]
 INFO_COLUMNS = ["Модуль", "Категория", "Откуда", "Варианты", "Комментарий", "Где"]
-# Ячейки проверяются тем же regex, что и при сборке: неверное значение не принимается ещё в таблице
-EDITOR_COLUMNS = {
-    "Включить": st.column_config.CheckboxColumn(default=True),
-    "Пакет PyPI": st.column_config.TextColumn(required=True, validate=PACKAGE_NAME.pattern,
-                                              help="имя на PyPI, например scikit-learn"),
-    "Версия": st.column_config.TextColumn(validate=VERSION_SPEC.pattern, help="например 1.26.4 или >=2.0"),
-    "Подтверждено": st.column_config.CheckboxColumn(default=True,
-                                                    help="снимите, если не уверены, — в requirements.txt будет пометка"),
-}
-# Файлы пакета для предпросмотра → язык подсветки ("markdown" — показать как текст)
-PREVIEW = {"README.md": "markdown", "requirements.txt": "text", "REPORT.md": "markdown", "Dockerfile": "dockerfile",
-           "verify.sh": "bash", "verify.ps1": "powershell", "repro.json": "json"}
-PREVIEW_HEIGHT = 480  # px: длинный отчёт прокручивается внутри вкладки, а не растягивает страницу
 
 st.set_page_config(page_title="repro-packer", page_icon="📦", layout="wide")
 
@@ -84,21 +71,6 @@ def show_metrics(analysis: Analysis) -> None:
     cols[4].metric("Нужно подтвердить", sum(d.needs_confirmation for d in deps))
 
 
-def show_verdict(analysis: Analysis) -> None:
-    """Одна строка-ответ на главный вопрос: можно ли уже отдавать пакет коллеге."""
-    high = sum(i.level == "high" for i in analysis.issues)
-    medium = sum(i.level == "medium" for i in analysis.issues)
-    if high:
-        st.error(f"**Скорее всего, у коллеги не запустится.** Критичных проблем: {high} — исправьте их "
-                 "по разделу 3 и загрузите проект заново.", icon="🔴")
-    elif medium:
-        st.warning(f"**Почти готово.** Пунктов, где нужно ваше решение: {medium} — проверьте таблицу "
-                   "зависимостей и раздел 3.", icon="🟡")
-    else:
-        st.success("**Явных препятствий нет.** Скачайте пакет и проверьте его командой `verify.sh` "
-                   "на чистой машине.", icon="🟢")
-
-
 def _cell(row: pd.Series, column: str) -> str:
     value = row.get(column)
     return "" if value is None or pd.isna(value) else str(value).strip()
@@ -124,7 +96,8 @@ def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
     if rows.empty:
         st.info("Внешних зависимостей не найдено — requirements.txt будет без пакетов.")
     edited = st.data_editor(rows, key=key, num_rows="dynamic", width="stretch", hide_index=True,
-                            disabled=INFO_COLUMNS, column_config=EDITOR_COLUMNS)
+                            disabled=INFO_COLUMNS,
+                            column_config={"Версия": st.column_config.TextColumn(help="например 1.26.4 или >=2.0")})
     with st.expander("Стандартная библиотека и локальные модули (в requirements не попадают)"):
         st.dataframe(pd.DataFrame([{"Модуль": d.module, "Категория": CATEGORIES[d.category],
                                     "Где": ", ".join(d.locations[:3])}
@@ -159,11 +132,11 @@ def run_options(analysis: Analysis, name: str) -> tuple[str, str, str, str]:
     entry = cols[0].selectbox("Точка входа", analysis.entry_candidates,
                               help="Первым предложен файл с `if __name__ == '__main__'`")
     versions = sorted({*PYTHON_VERSIONS, analysis.suggested_python}, key=lambda v: tuple(map(int, v.split("."))))
-    python = cols[1].selectbox("Python", versions, index=versions.index(analysis.suggested_python))
+    python = cols[1].selectbox("Python", versions, index=versions.index(analysis.suggested_python),
+                               help=f"Предложено: {analysis.python_reason}")
     needs_args = any(f.code == "cli_args" for s in analysis.scans if s.path == entry for f in s.findings)
     args = cols[2].text_input("Аргументы запуска", placeholder="--input data.csv" if needs_args else "")
     project_name = cols[3].text_input("Название проекта", value=name)
-    st.caption(f"Python {analysis.suggested_python} предложен: {analysis.python_reason}.")
     if needs_args and not args:
         st.caption("ℹ️ Точка входа читает аргументы командной строки — при необходимости укажите их.")
     return entry, python, args, project_name
@@ -171,8 +144,13 @@ def run_options(analysis: Analysis, name: str) -> tuple[str, str, str, str]:
 
 def download_section(analysis: Analysis, options: PackOptions) -> None:
     st.subheader("5. Пакет воспроизводимости")
+    # Одно значение на сессию → детерминированный ZIP и совпадение превью с содержимым.
+    if "pack_created" not in st.session_state:
+        st.session_state.pack_created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    options = replace(options, created=st.session_state.pack_created)
     try:
         package = build_zip(analysis, options)
+        preview = render_package(analysis, options)
     except ValueError as exc:
         st.error(f"Пакет не собран: {exc}")
         return
@@ -181,20 +159,16 @@ def download_section(analysis: Analysis, options: PackOptions) -> None:
         st.warning(f"Не подтверждены: {', '.join(unconfirmed)} — попадут в requirements.txt с пометкой.")
     st.download_button("⬇️ Скачать пакет (ZIP)", package, file_name=f"{slugify(options.project_name)}-repro.zip",
                        mime="application/zip", type="primary")
-    # Предпросмотр читается из готового архива — показано ровно то, что будет скачано
-    archive = zipfile.ZipFile(io.BytesIO(package))
-    names = archive.namelist()
-    root = names[0].split("/", 1)[0]
-    st.caption(f"Файлов в архиве: {len(names)} · {len(package) / 1024:.0f} КБ")
-    tabs = st.tabs([*PREVIEW, "Состав архива"])
-    for tab, (name, language) in zip(tabs, PREVIEW.items()):
-        text = archive.read(f"{root}/{name}").decode("utf-8-sig")
-        with tab, st.container(height=PREVIEW_HEIGHT):
-            if language == "markdown":
-                st.markdown(text)
-            else:
-                st.code(text, language=language)
-    tabs[-1].code("\n".join(names), language="text")
+    names = zipfile.ZipFile(io.BytesIO(package)).namelist()
+    tabs = st.tabs(["README.md", "requirements.txt", "REPORT.md", "Dockerfile", "verify.sh", "Состав архива"])
+    with tabs[0]:
+        st.markdown(preview["README.md"])
+    tabs[1].code(preview["requirements.txt"], language="text")
+    with tabs[2]:
+        st.markdown(preview["REPORT.md"])
+    tabs[3].code(preview["Dockerfile"], language="dockerfile")
+    tabs[4].code(preview["verify.sh"], language="bash")
+    tabs[5].code("\n".join(names), language="text")
     st.info("**Проверка у коллеги:** распакуйте архив → `sh verify.sh` (Windows: `verify.ps1`) → "
             "в конце `verify_log.txt` будет `РЕЗУЛЬТАТ: OK` или причина ошибки, а точные версии — "
             "в `requirements.lock.txt`.")
@@ -220,7 +194,6 @@ def main() -> None:
         st.error("В проекте нет файлов .py/.ipynb для запуска.")
         return
     show_metrics(analysis)
-    show_verdict(analysis)
     signature = hashlib.sha256(b"".join(p.encode() + d for p, d in sorted(files.items()))).hexdigest()[:12]
     requirements = dependency_editor(analysis, key=f"deps-{signature}-{use_local_env}")
     show_issues(analysis)

@@ -19,9 +19,9 @@ if ($LASTEXITCODE) { Log "РЕЗУЛЬТАТ: ОШИБКА установки з
 & $VPy -m pip freeze | Set-Content requirements.lock.txt
 Log "-- Точные версии сохранены в requirements.lock.txt"
 
-Log {{ run_log_ps }}
+Log "-- Запуск: {{ run_command }}"
 Push-Location project
-& $VPy {{ run_tail_ps }} *>&1 | Tee-Object -FilePath $Log -Append
+& $VPy {{ run_tail }} *>&1 | Tee-Object -FilePath $Log -Append
 $Code = $LASTEXITCODE
 Pop-Location
 if ($Code -eq 0) { Log "РЕЗУЛЬТАТ: OK (код выхода 0)" } else { Log "РЕЗУЛЬТАТ: ОШИБКА запуска (код выхода $Code)" }

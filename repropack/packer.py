@@ -12,20 +12,20 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import __version__
-from .analysis import Analysis
-from .classify import PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
-from .secrets import redact_bytes
+from .analysis import Analysis, decode
+from .classify import Dependency, normalize
+from .secrets import redact
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
 CATEGORIES = {"stdlib": "стандартная библиотека", "removed": "удалён из Python", "local": "локальный модуль",
-              "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором",
-              "conda_only": "пакет conda (не для pip)"}
+              "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором"}
 LEVELS = {"high": "критично", "medium": "нужно решение", "info": "к сведению"}
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?$")
-PYTHON_VERSION = re.compile(r"^\d+\.\d+$")
+VERSION_SPEC = re.compile(r"^[A-Za-z0-9.*+!<>=~, -]*$")
 VERSION_OPERATORS = ("==", ">=", "<=", "~=", "!=", ">", "<")
 NOTEBOOK_RUNNERS = ("nbconvert", "ipykernel")
+PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,11 @@ class PackOptions:
     python_version: str
     requirements: tuple[Requirement, ...]
     run_args: str = ""
+    # Фиксированное время создания пакета. Обеспечивает детерминированный ZIP:
+    # одинаковый вход → одинаковый SHA-256. Передавайте одно значение в render_package и build_zip.
+    created: str = ""
+    # Фиксированная дата внутри ZIP-записей (DOS-формат). (1980,1,1,0,0,0) — минимум.
+    zip_date: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)
 
 
 def packaged_dependencies(analysis: Analysis) -> tuple[Dependency, ...]:
@@ -114,11 +119,6 @@ def run_parts(entry_point: str, run_args: str) -> list[str]:
         raise ValueError(f"Аргументы запуска не разобрать (незакрытая кавычка?): {run_args!r}") from exc
 
 
-def ps_quote(text: str) -> str:
-    """Литерал PowerShell в одинарных кавычках: $(...) не раскрывается; ' и типографские ‘’‚‛ удваиваются."""
-    return "'" + re.sub("['‘’‚‛]", lambda m: m.group() * 2, text) + "'"
-
-
 def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
 
@@ -126,14 +126,11 @@ def slugify(name: str) -> str:
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
     run_tail = shlex.join(parts)
-    run_log = f"-- Запуск: python {run_tail}"
     return {
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
         "python_version": options.python_version, "python_reason": analysis.python_reason,
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
         "run_tail": run_tail, "run_command": f"python {run_tail}", "cmd_json": json.dumps(["python", *parts]),
-        "run_tail_ps": " ".join(map(ps_quote, parts)),
-        "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
         "excluded": analysis.secret_files, "redacted": bool(analysis.secrets),
         "key_issues": [i for i in analysis.issues if i.level != "info"], "issues": analysis.issues,
@@ -157,9 +154,7 @@ def _manifest(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement,
 
 def render_package(analysis: Analysis, options: PackOptions, created: str | None = None) -> dict[str, str]:
     """Сгенерированные файлы пакета (без исходников) — для предпросмотра в интерфейсе и для ZIP."""
-    if not PYTHON_VERSION.match(options.python_version):
-        raise ValueError(f"Некорректная версия Python: {options.python_version!r} — нужна вида 3.11")
-    created = created or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    created = created or options.created or datetime.now(timezone.utc).isoformat(timespec="seconds")
     reqs = _with_notebook_runners(options)
     ctx = _context(analysis, options, reqs, created)
     rendered = {name: TEMPLATES.get_template(f"{name}.j2").render(ctx)
@@ -171,7 +166,7 @@ def render_package(analysis: Analysis, options: PackOptions, created: str | None
 def _project_files(analysis: Analysis) -> dict[str, bytes]:
     """Исходники для пакета: без файлов-секретов, с замаскированными секретами в тексте."""
     with_secrets = {h.path for h in analysis.secrets}
-    return {path: redact_bytes(data) if path in with_secrets else data
+    return {path: redact(decode(data)).encode() if path in with_secrets else data
             for path, data in analysis.files.items() if path not in analysis.secret_files}
 
 
@@ -180,12 +175,12 @@ def build_zip(analysis: Analysis, options: PackOptions) -> bytes:
         raise ValueError(f"Точка входа {options.entry_point!r} не найдена в проекте")
     root = f"{slugify(options.project_name)}-repro"
     generated = {name: text.encode("utf-8-sig" if name.endswith(".ps1") else "utf-8")
-                 for name, text in render_package(analysis, options).items()}
+                 for name, text in render_package(analysis, options, created=options.created or None).items()}
     entries = {**{f"project/{p}": data for p, data in _project_files(analysis).items()}, **generated}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(entries.items()):
-            info = zipfile.ZipInfo(f"{root}/{name}", date_time=datetime.now().timetuple()[:6])
+            info = zipfile.ZipInfo(f"{root}/{name}", date_time=options.zip_date)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (0o755 if name == "verify.sh" else 0o644) << 16
             archive.writestr(info, data)

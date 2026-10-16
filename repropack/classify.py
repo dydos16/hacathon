@@ -27,26 +27,15 @@ REMOVED_STDLIB = {
 }
 # Модули стандартной библиотеки, которых нет в более старых версиях Python
 STDLIB_ADDED = {"tomllib": (3, 11), "zoneinfo": (3, 9), "graphlib": (3, 9)}
-# Методы pandas, которые молча требуют дополнительный пакет
+# Методы, которые молча требуют дополнительный пакет
 IMPLICIT = {
     "read_excel": ("openpyxl", "pandas.read_excel"), "to_excel": ("openpyxl", "pandas.to_excel"),
     "read_parquet": ("pyarrow", "pandas.read_parquet"), "to_parquet": ("pyarrow", "pandas.to_parquet"),
     "read_feather": ("pyarrow", "pandas.read_feather"), "read_hdf": ("tables", "pandas.read_hdf"),
     "to_hdf": ("tables", "pandas.to_hdf"),
 }
-PANDAS_LIKE = {"pandas", "geopandas", "modin", "dask"}  # у polars и других read_excel требует другие пакеты
-NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-REQ_LINE = re.compile(rf"^({NAME})\s*(\[[^\]]*\])?\s*([^;]*)")
-CONDA_SPEC = re.compile(rf"^(?:[\w.-]+::)?({NAME})\s*(==|>=|<=|!=|~=|=|>|<)?\s*([^\s#]*)")
-POETRY_RANGE = re.compile(r"([\^~])\s*(\d+(?:\.\d+)*)")
-_OPERATOR = r"(?:==|!=|<=|>=|~=|<|>)"
-_VERSION = r"\d[A-Za-z0-9.*+!_-]*"
-# Версия для requirements.txt: «1.26.4», «>=2.0», «>=1.2,<2» или пусто. Шаблон совместим с JavaScript:
-# интерфейс проверяет им ячейки таблицы
-VERSION_SPEC = re.compile(rf"^\s*(?:(?:{_OPERATOR}\s*)?{_VERSION}\s*(?:,\s*{_OPERATOR}\s*{_VERSION}\s*)*)?$")
-PACKAGED_CATEGORIES = ("external", "implicit", "declared_only", "removed")
-DECLARED_ONLY_NOTE = "объявлено, но import не найден (плагин, бэкенд или лишняя зависимость)"
-CONDA_ONLY_NOTE = "пакет conda без import в коде — в requirements.txt не включён"
+REQ_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*([^;]*)")
+CONDA_LINE = re.compile(r"^\s*-\s*(?:[\w-]+::)?([A-Za-z0-9][A-Za-z0-9._-]*)\s*(==|>=|<=|=|>|<|~=)?\s*([^\s#]*)")
 MAPPING_FILE = Path(__file__).parent / "data" / "module_to_package.json"
 
 
@@ -55,13 +44,12 @@ class Declared:
     name: str
     spec: str
     source: str
-    conda: bool = False  # пакет conda не из секции pip: — на PyPI его может не быть
 
 
 @dataclass(frozen=True)
 class Dependency:
     module: str
-    category: str            # stdlib | removed | local | external | implicit | declared_only | conda_only
+    category: str            # stdlib | removed | local | external | implicit | declared_only
     package: str = ""
     status: str = ""         # откуда известно имя пакета
     candidates: tuple[str, ...] = ()
@@ -83,53 +71,12 @@ def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _clean_spec(spec: str) -> str:
-    """Спецификатор, понятный pip; ссылки, маркеры и прочее — «версия неизвестна»."""
-    spec = spec.strip()
-    return spec if VERSION_SPEC.match(spec) else ""
-
-
 def _requirement(line: str) -> tuple[str, str] | None:
-    """Имя и версия из строки requirements; опции pip, ссылки и пути к папкам пропускаются.
-
-    «pkg @ https://…» — прямая ссылка: имя пакета известно, версия — нет.
-    """
-    line = line.split("#", 1)[0].split(" --", 1)[0].strip().rstrip("\\").strip()
-    name_part = line.partition("@")[0]
-    if not line or line.startswith("-") or "/" in name_part or ":" in name_part:
+    line = line.split("#", 1)[0].strip()
+    if not line or line.startswith("-"):
         return None
-    match = REQ_LINE.match(name_part)
-    if not match:
-        return None
-    return match.group(1), "" if "@" in line else _clean_spec(match.group(3))
-
-
-def _table(data: object, *keys: str) -> dict:
-    """Вложенная таблица TOML или {}: файл автора может быть устроен как угодно."""
-    for key in keys:
-        data = data.get(key) if isinstance(data, dict) else None
-    return data if isinstance(data, dict) else {}
-
-
-def _poetry_spec(spec: object) -> str | None:
-    """Версия Poetry → спецификатор pip: ^1.2 → >=1.2,<2; ~1.2.3 → >=1.2.3,<1.3; 2.0 → ==2.0.
-
-    None — зависимость не с PyPI (path, git, url).
-    """
-    if isinstance(spec, dict):
-        if spec.keys() & {"path", "git", "url"}:
-            return None
-        spec = spec.get("version", "")
-    spec = str(spec).strip()
-    if match := POETRY_RANGE.fullmatch(spec):
-        operator, version = match.groups()
-        parts = [int(p) for p in version.split(".")]
-        bump = (next((i for i, p in enumerate(parts) if p), len(parts) - 1) if operator == "^"
-                else min(1, len(parts) - 1))
-        return f">={version},<{'.'.join(map(str, [*parts[:bump], parts[bump] + 1]))}"
-    if re.fullmatch(r"\d+(\.\d+)*(\.\*)?", spec):
-        return f"=={spec}"
-    return _clean_spec(spec)
+    match = REQ_LINE.match(line)
+    return (match.group(1), match.group(3).strip()) if match else None
 
 
 def _from_pyproject(text: str, source: str) -> tuple[list[Declared], str]:
@@ -137,57 +84,27 @@ def _from_pyproject(text: str, source: str) -> tuple[list[Declared], str]:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return [], ""
-    project = _table(data, "project")
-    listed = project.get("dependencies")
-    lines = [line for line in listed if isinstance(line, str)] if isinstance(listed, list) else []
-    found = [Declared(*req, source) for req in map(_requirement, lines) if req]
-    poetry = _table(data, "tool", "poetry", "dependencies")
+    project = data.get("project", {})
+    found = [Declared(*req, source) for req in map(_requirement, project.get("dependencies", [])) if req]
+    poetry = data.get("tool", {}).get("poetry", {}).get("dependencies", {})
     for name, spec in poetry.items():
-        version = None if name == "python" or not re.fullmatch(NAME, name) else _poetry_spec(spec)
-        if version is not None:
-            found.append(Declared(name, version, source))
-    return found, str(project.get("requires-python") or poetry.get("python") or "")
-
-
-def _conda_entries(text: str) -> list[tuple[str, bool]]:
-    """Элементы списка dependencies: из environment.yml и флаг «из секции pip:»."""
-    entries, section, pip_indent = [], "", -1
-    for line in text.splitlines():
-        item, indent = line.strip(), len(line) - len(line.lstrip())
-        if indent == 0 and item and not item.startswith(("-", "#")):
-            section, pip_indent = item.split(":", 1)[0].strip(), -1
-        elif section == "dependencies" and item.startswith("-"):
-            entry, in_pip = item[1:].strip(), 0 <= pip_indent < indent
-            if not in_pip:
-                pip_indent = indent if entry.replace(" ", "") == "pip:" else -1
-            entries.append((entry, in_pip))
-    return entries
-
-
-def _conda_spec(operator: str, version: str, build: str) -> str:
-    """«=1.24» в conda — любая 1.24.x; со строкой сборки (conda env export) версия точная."""
-    if operator == "=":
-        operator, version = "==", version if build or version.endswith("*") else f"{version}.*"
-    return _clean_spec(f"{operator}{version}") if version else ""
+        if name != "python":
+            found.append(Declared(name, spec if isinstance(spec, str) and spec != "*" else "", source))
+    return found, project.get("requires-python", "") or str(poetry.get("python", ""))
 
 
 def _from_conda(text: str, source: str) -> tuple[list[Declared], str]:
-    """environment.yml, в том числе от conda env export: «numpy=1.26.4=py311h64a7726_0»."""
     found, python = [], ""
-    for entry, in_pip in _conda_entries(text):
-        if in_pip:
-            if req := _requirement(entry):
-                found.append(Declared(*req, source))
+    for line in text.splitlines():
+        match = CONDA_LINE.match(line)
+        if not match or line.rstrip().endswith(":"):
             continue
-        match = CONDA_SPEC.match(entry)
-        if not match or match.group(1) == "pip":
-            continue
-        name, operator, raw = match.group(1), match.group(2) or "", match.group(3)
-        version, _, build = raw.partition("=") if operator in ("=", "==") else (raw, "", "")
+        name, op, version = match.groups()
+        spec = f"=={version}.*" if op == "=" else f"{op}{version}" if op else ""
         if name == "python":
-            python = version if operator in ("", "=", "==") else f"{operator}{version}"
-        else:
-            found.append(Declared(name, _conda_spec(operator, version, build), source, conda=True))
+            python = version
+        elif name != "pip":
+            found.append(Declared(name, spec, source))
     return found, python
 
 
@@ -218,14 +135,9 @@ def is_local(top: str, importer: str, files: dict[str, bytes]) -> bool:
     return any(_module_exists("" if f == "." else f"{f}/", top, files) for f in folders)
 
 
-@cache
-def _installed_modules() -> dict[str, list[str]]:
-    """Модуль верхнего уровня → дистрибутивы в текущей среде (дорого считать, поэтому один раз)."""
-    return metadata.packages_distributions()
-
-
 def _local_env_distribution(top: str) -> str:
-    return next(iter(_installed_modules().get(top, [])), "")
+    dists = metadata.packages_distributions().get(top, [])
+    return dists[0] if dists else ""
 
 
 def _local_env_version(package: str) -> str:
@@ -237,7 +149,20 @@ def _local_env_version(package: str) -> str:
 
 def _resolve_package(top: str, declared: dict[str, Declared], use_local_env: bool) -> dict:
     known, ambiguous = load_mapping()
+    # 1) Явное объявление в проекте побеждает справочник — автор знает, что ему нужно.
+    if normalize(top) in declared:
+        return {"package": declared[normalize(top)].name, "status": "объявлено в проекте"}
     if top in known:
+        # Справочник — не истина: у cv2/PIL/torch бывают варианты. Если один из них
+        # объявлен как alternative — предпочитаем его.
+        alternatives = known.get(f"{top}#alternatives") or []
+        declared_match = next((a for a in alternatives if normalize(a) in declared), "")
+        if declared_match:
+            return {"package": declared_match, "status": "объявлено в проекте"}
+        if alternatives:
+            return {"package": known[top], "status": "справочник", "candidates": tuple(alternatives),
+                    "needs_confirmation": True,
+                    "note": "у этого модуля несколько пакетов — проверьте, какой именно нужен"}
         return {"package": known[top], "status": "справочник"}
     if top in ambiguous:
         candidates = tuple(ambiguous[top])
@@ -271,74 +196,66 @@ def _removed(top: str, common: dict) -> Dependency:
                       needs_confirmation=bool(replacement), note=note, **common)
 
 
-def _collect_usages(scans: list[FileScan]) -> dict[str, list[tuple[str, str, str]]]:
-    """Модуль верхнего уровня → [(файл, место для отчёта, вид импорта)]."""
-    usages: dict[str, list[tuple[str, str, str]]] = {}
+def _collect_usages(scans: list[FileScan]) -> dict[str, list[tuple[str, int, str]]]:
+    usages: dict[str, list[tuple[str, int, str]]] = {}
     for scan in scans:
         for ref in scan.imports:
             if ref.kind != "relative" and ref.top:
-                usages.setdefault(ref.top, []).append((scan.path, scan.where(ref.line), ref.kind))
+                usages.setdefault(ref.top, []).append((scan.path, ref.line, ref.kind))
     return usages
 
 
-def _classify_module(top: str, uses: list[tuple[str, str, str]], files: dict[str, bytes],
-                     declared: dict[str, Declared], use_local_env: bool) -> Dependency:
-    common = {"module": top, "kinds": tuple(sorted({kind for _, _, kind in uses})),
-              "locations": tuple(where for _, where, _ in uses)}
-    if top in REMOVED_STDLIB:
-        return _removed(top, common)
-    if top in STDLIB and _module_exists("", top, files):
-        return Dependency(category="local", **common,
-                          note="имя совпадает с модулем стандартной библиотеки — Python возьмёт файл проекта")
-    if top in STDLIB:
-        return Dependency(category="stdlib", **common)
-    if any(is_local(top, path, files) for path, _, _ in uses):
-        return Dependency(category="local", **common)
-    resolved = _resolve_package(top, declared, use_local_env)
-    version, source = _version(resolved["package"], declared, use_local_env, top)
-    return Dependency(category="external", version=version, version_source=source, **resolved, **common)
-
-
-def _packages(deps: list[Dependency]) -> set[str]:
-    return ({normalize(d.package) for d in deps if d.package}
-            | {normalize(d.module) for d in deps if d.category == "external"})
-
-
-def _implicit(scans: list[FileScan], usages: dict, deps: list[Dependency], declared: dict[str, Declared],
+def _implicit(scans: list[FileScan], known_packages: set[str], declared: dict[str, Declared],
               use_local_env: bool) -> list[Dependency]:
-    if not usages.keys() & PANDAS_LIKE:
-        return []
-    found, seen = [], _packages(deps)
+    deps = []
     for scan in scans:
         for method in sorted(scan.method_calls & IMPLICIT.keys()):
             package, origin = IMPLICIT[method]
-            if normalize(package) in seen:
+            if normalize(package) in known_packages:
                 continue
-            seen.add(normalize(package))
+            known_packages.add(normalize(package))
             version, source = _version(package, declared, use_local_env)
-            found.append(Dependency(module=package, category="implicit", package=package, status="неявная",
-                                    version=version, version_source=source, locations=(scan.path,),
-                                    needs_confirmation=True, note=f"{origin} требует этот пакет, хотя import нет"))
-    return found
-
-
-def _declared_only(declared: dict[str, Declared], packages: set[str]) -> list[Dependency]:
-    """Объявлено автором, но не импортируется. Пакеты conda в requirements не идут: многие из них —
-    системные библиотеки (openssl, libgcc), которых нет на PyPI."""
-    return [Dependency(module=item.name, category="conda_only" if item.conda else "declared_only",
-                       package=item.name, status="объявлено в проекте", version=item.spec,
-                       version_source=item.source, locations=(item.source,),
-                       note=CONDA_ONLY_NOTE if item.conda else DECLARED_ONLY_NOTE)
-            for key, item in declared.items() if key not in packages]
+            deps.append(Dependency(module=package, category="implicit", package=package, status="неявная",
+                                   version=version, version_source=source, locations=(scan.path,),
+                                   needs_confirmation=True, note=f"{origin} требует этот пакет, хотя import нет"))
+    return deps
 
 
 def classify(scans: list[FileScan], files: dict[str, bytes], use_local_env: bool = False) -> list[Dependency]:
-    from_files, _ = parse_declared(files)
-    hinted = [(req, scan.path) for scan in scans for req in map(_requirement, scan.pip_hints) if req]
-    declared = {**{normalize(name): Declared(name, spec, f"{path} (!pip install)") for (name, spec), path in hinted},
-                **from_files}  # файлы зависимостей автора важнее !pip install в ноутбуке
+    declared, _ = parse_declared(files)
+    for scan in scans:
+        for hint in scan.pip_hints:
+            if req := _requirement(hint):
+                declared.setdefault(normalize(req[0]), Declared(req[0], req[1], f"{scan.path} (!pip install)"))
+
+    deps = []
     usages = _collect_usages(scans)
-    deps = [_classify_module(top, usages[top], files, declared, use_local_env)
-            for top in sorted(usages, key=str.lower)]
-    deps += _implicit(scans, usages, deps, declared, use_local_env)
-    return deps + _declared_only(declared, _packages(deps))
+    for top in sorted(usages, key=str.lower):
+        uses = usages[top]
+        common = {"module": top, "kinds": tuple(sorted({k for _, _, k in uses})),
+                  "locations": tuple(f"{p}:{line}" for p, line, _ in uses)}
+        if top in REMOVED_STDLIB:
+            deps.append(_removed(top, common))
+        elif top in STDLIB and _module_exists("", top, files):
+            deps.append(Dependency(category="local", **common,
+                                   note="имя совпадает с модулем стандартной библиотеки — Python возьмёт файл проекта"))
+        elif top in STDLIB:
+            deps.append(Dependency(category="stdlib", **common))
+        elif any(is_local(top, path, files) for path, _, _ in uses):
+            deps.append(Dependency(category="local", **common))
+        else:
+            resolved = _resolve_package(top, declared, use_local_env)
+            version, source = _version(resolved["package"], declared, use_local_env, top)
+            deps.append(Dependency(category="external", version=version, version_source=source,
+                                   **resolved, **common))
+
+    packages = ({normalize(d.package) for d in deps if d.package}
+                | {normalize(d.module) for d in deps if d.category == "external"})
+    deps += _implicit(scans, packages, declared, use_local_env)
+    for key, item in declared.items():
+        if key not in packages:
+            deps.append(Dependency(module=item.name, category="declared_only", package=item.name,
+                                   status="объявлено в проекте", version=item.spec,
+                                   version_source=item.source, locations=(item.source,),
+                                   note="объявлено, но import не найден (плагин, бэкенд или лишняя зависимость)"))
+    return deps

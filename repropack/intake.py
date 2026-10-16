@@ -5,11 +5,12 @@
 
 import io
 import zipfile
-import zlib
 from pathlib import Path, PurePosixPath
 
 MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 MAX_UNPACKED_BYTES = 100 * 1024 * 1024
+MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
 MAX_FILES = 2000
 JUNK_PARTS = {
     "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", ".idea", ".vscode",
@@ -17,9 +18,6 @@ JUNK_PARTS = {
 }
 JUNK_SUFFIXES = {".pyc", ".pyo"}
 JUNK_NAMES = {".DS_Store", "Thumbs.db"}
-ENCRYPTED_FLAG = 0x1
-# Что бросает zipfile на повреждённых данных, неподдерживаемом сжатии или пароле
-ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
 
 
 class IntakeError(ValueError):
@@ -28,8 +26,8 @@ class IntakeError(ValueError):
 
 def _safe_path(raw: str) -> str | None:
     """Нормализует путь из архива; None — служебный файл; IntakeError — попытка выйти из папки."""
-    if any(ord(ch) < 32 for ch in raw):
-        raise IntakeError(f"Управляющие символы в имени файла: {raw!r}")
+    if any(c in raw for c in "\x00\r\n"):
+        raise IntakeError(f"Недопустимые символы в имени файла: {raw!r}")
     path = PurePosixPath(raw.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts or (path.parts and ":" in path.parts[0]):
         raise IntakeError(f"Небезопасный путь в архиве: {raw!r}")
@@ -60,31 +58,31 @@ def read_zip(data: bytes) -> dict[str, bytes]:
         raise IntakeError(f"В архиве больше {MAX_FILES} файлов")
     if sum(i.file_size for i in entries) > MAX_UNPACKED_BYTES:
         raise IntakeError("Распакованный архив слишком большой (возможна zip-бомба)")
+    for info in entries:
+        if info.file_size > MAX_FILE_BYTES:
+            raise IntakeError(f"Файл {info.filename!r} больше {MAX_FILE_BYTES // 1024 // 1024} МБ")
+        # compress_size == 0 бывает у пустых записей — тогда ratio не считаем
+        if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+            raise IntakeError(f"Подозрительная степень сжатия у {info.filename!r} (возможна zip-бомба)")
+        # симлинки и прочие необычные типы — отклоняем
+        if info.external_attr >> 16 & 0o170000 == 0o120000:
+            raise IntakeError(f"Символическая ссылка в архиве: {info.filename!r}")
     files = {}
     for info in entries:
         path = _safe_path(info.filename)
         if path is not None:
-            files[path] = _read_entry(archive, info)
+            files[path] = archive.read(info)
     return _strip_common_root(files)
 
 
-def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
-    if info.flag_bits & ENCRYPTED_FLAG:
-        raise IntakeError("Архив защищён паролем — загрузите его без пароля")
-    try:
-        return archive.read(info)
-    except ZIP_READ_ERRORS as exc:
-        raise IntakeError(f"Не удалось распаковать {info.filename!r}: архив повреждён "
-                          "или сжат неподдерживаемым методом") from exc
-
-
 def read_upload(uploads: list[tuple[str, bytes]]) -> dict[str, bytes]:
-    """Принимает список (имя, содержимое): ZIP раскрывается, остальные файлы кладутся в корень."""
     files: dict[str, bytes] = {}
     for name, data in uploads:
         if name.lower().endswith(".zip"):
             files.update(read_zip(data))
             continue
+        if len(data) > MAX_FILE_BYTES:
+            raise IntakeError(f"Файл {name!r} больше {MAX_FILE_BYTES // 1024 // 1024} МБ")
         path = _safe_path(PurePosixPath(name.replace("\\", "/")).name)
         if path is not None:
             files[path] = data
@@ -94,18 +92,13 @@ def read_upload(uploads: list[tuple[str, bytes]]) -> dict[str, bytes]:
 
 
 def read_directory(root: Path) -> dict[str, bytes]:
-    """Для CLI и демо-проектов: читает папку с теми же фильтрами и лимитами, что и архив.
-
-    Лимиты проверяются по ходу чтения, чтобы случайно указанная огромная папка не попала в память целиком.
-    """
-    files, total = {}, 0
+    """Для CLI и демо-проектов: читает папку с теми же фильтрами, что и архив."""
+    files = {}
     for file in sorted(root.rglob("*")):
-        path = _safe_path(file.relative_to(root).as_posix())
-        if path is None or not file.is_file():
-            continue
-        files[path] = file.read_bytes()
-        total += len(files[path])
-        if len(files) > MAX_FILES or total > MAX_UNPACKED_BYTES:
-            raise IntakeError(f"Папка слишком большая: больше {MAX_FILES} файлов "
-                              f"или {MAX_UNPACKED_BYTES // 1024 // 1024} МБ")
+        if file.is_file():
+            path = _safe_path(file.relative_to(root).as_posix())
+            if path is not None:
+                files[path] = file.read_bytes()
+    if len(files) > MAX_FILES or sum(map(len, files.values())) > MAX_UNPACKED_BYTES:
+        raise IntakeError("Папка слишком большая")
     return files

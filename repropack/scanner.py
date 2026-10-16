@@ -3,7 +3,6 @@
 import ast
 import json
 import re
-import shlex
 from dataclasses import dataclass, replace
 
 DATA_EXTENSIONS = (
@@ -11,34 +10,19 @@ DATA_EXTENSIONS = (
     ".npy", ".npz", ".h5", ".hdf5", ".nc", ".mat", ".pkl", ".pickle", ".xml", ".yaml", ".yml",
     ".fits", ".wav", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".sqlite", ".db",
 )
-# Папки, которые есть только на машине автора: домашние, Colab/Kaggle, кластеры, подключённые диски
-ABSOLUTE_PATH = re.compile(r"^(/(home|Users|root|mnt|media|Volumes|data|tmp|var|opt|srv|content|kaggle|scratch"
-                           r"|gpfs|lustre)/|[A-Za-z]:[\\/]|~[\\/])")
-RANDOM_CALLS = {"random", "rand", "randn", "randint", "randperm", "shuffle", "choice", "normal", "uniform",
+ABSOLUTE_PATH = re.compile(r"^(/(home|Users|mnt|media|data|tmp|var|opt|srv)/|[A-Za-z]:[\\/]|~[\\/])")
+RANDOM_CALLS = {"random", "rand", "randn", "randint", "shuffle", "choice", "normal", "uniform",
                 "permutation", "sample", "integers", "standard_normal"}
-RANDOM_OWNERS = {"random", "rng", "generator", "gen", "torch"}
+RANDOM_OWNERS = {"random", "rng", "generator", "gen"}
 SEED_CALLS = {"seed", "manual_seed", "default_rng", "RandomState", "set_seed"}
 IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
 CLI_MODULES = {"argparse", "click", "typer", "fire", "optparse", "getopt"}
 OUTPUT_CALLS = {"savefig", "to_csv", "to_excel", "to_json", "to_parquet", "to_hdf", "to_pickle",
                 "save", "savez", "savetxt", "imwrite", "dump", "write_text", "write_bytes", "imsave"}
-PATH_TYPES = {"Path", "PurePath", "PosixPath", "WindowsPath"}
-NO_REQUIREMENT = (3, 6)
-SYNTAX_MIN_PYTHON = {getattr(ast, name): version for name, version in (
-    ("NamedExpr", (3, 8)), ("Match", (3, 10)), ("TryStar", (3, 11)), ("TypeAlias", (3, 12)))
-    if hasattr(ast, name)}
-# Что бросает ast.parse на коде, который не разобрать: синтаксис, NUL-байт (Python 3.11), глубокая вложенность
-SYNTAX_ERRORS = (SyntaxError, ValueError)
-COMPLEXITY_ERRORS = (RecursionError, MemoryError)
-# !pip, %pip, !pip3, !python -m pip, !{sys.executable} -m pip
-PIP_MAGIC = re.compile(r"^\s*[!%]\s*(?:\S+\s+-m\s+)?pip3?\s+install\s+(.+)$")
-PIP_VALUE_OPTIONS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable", "-i", "--index-url",
-                     "--extra-index-url", "-f", "--find-links", "-t", "--target"}
-PIP_REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?([<>=!~][^/:@\s]*)?$")
-LOCAL_FILE_SUFFIXES = (".txt", ".whl", ".gz", ".zip", ".cfg", ".toml", ".py")
-PYTHON_CELL_MAGICS = {"time", "timeit", "capture", "prun", "debug", "memit"}
-
-Context = tuple[str, ...]
+SYNTAX_MIN_PYTHON = {ast.NamedExpr: (3, 8), ast.Match: (3, 10), ast.TryStar: (3, 11)}
+if hasattr(ast, "TypeAlias"):
+    SYNTAX_MIN_PYTHON[ast.TypeAlias] = (3, 12)
+PIP_MAGIC = re.compile(r"^\s*[!%]\s*pip\s+install\s+(.+)$")
 
 
 @dataclass(frozen=True)
@@ -55,7 +39,7 @@ class ImportRef:
 
 @dataclass(frozen=True)
 class Finding:
-    code: str     # см. FINDING_ISSUES в analysis.py
+    code: str     # dynamic_import | dynamic_unresolved | absolute_path | syntax_error | unseeded_random | cli_args | notebook_magic
     line: int
     detail: str
 
@@ -70,27 +54,19 @@ class FileScan:
     min_python: tuple[int, int]
     has_main_guard: bool
     pip_hints: tuple[str, ...] = ()
-    cell_lines: tuple[tuple[int, int], ...] = ()  # ноутбук: строка склеенного кода → (ячейка, строка в ней)
-
-    def where(self, line: int) -> str:
-        """Место для отчёта: «a.py:12», у ноутбука — «exp.ipynb, ячейка 3, стр. 2»."""
-        if not line:
-            return self.path
-        if line <= len(self.cell_lines):
-            cell, row = self.cell_lines[line - 1]
-            return f"{self.path}, ячейка {cell}, стр. {row}"
-        return f"{self.path}:{line}"
 
 
 def _dotted(node: ast.AST) -> str:
-    """«np.random.rand» для цепочки атрибутов; без рекурсии — цепочки бывают очень длинными."""
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
     if isinstance(node, ast.Name):
-        parts.append(node.id)
-    return ".".join(reversed(parts))
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Call):
+        # np.random.default_rng(42).normal → "np.random.default_rng().normal"
+        base = _dotted(node.func)
+        return f"{base}()" if base else ""
+    return ""
 
 
 def _catches_import_error(handler: ast.ExceptHandler) -> bool:
@@ -113,41 +89,7 @@ def _is_main_guard(test: ast.AST) -> bool:
     )
 
 
-def _is_data_name(value: str) -> bool:
-    """Похоже на локальный файл с данными. «.csv» само по себе — расширение (f.endswith('.csv')),
-    а «https://…/d.csv» — адрес в интернете, их наличие в загрузке не проверить."""
-    bare_extension = value.startswith(".") and "/" not in value
-    return (value.lower().endswith(DATA_EXTENSIONS) and " " not in value.strip()
-            and not bare_extension and "://" not in value)
-
-
-def _output_names(node: ast.Call) -> set[str]:
-    """Строки в вызове записи — имена выходных файлов, включая Path("x") перед .write_text()."""
-    roots = [*node.args, *(k.value for k in node.keywords)]
-    receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
-    if isinstance(receiver, ast.Call) and _dotted(receiver.func).rsplit(".", 1)[-1] in PATH_TYPES:
-        roots.append(receiver)
-    return {n.value for root in roots for n in ast.walk(root)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-
-
-def _kind(context: Context) -> str:
-    if "optional" in context:
-        return "optional"
-    return "conditional" if "if" in context else "static"
-
-
-def _children(node: ast.AST, context: Context) -> list[tuple[ast.AST, Context]]:
-    return [(child, context) for child in ast.iter_child_nodes(node)]
-
-
-class _Visitor:
-    """Собирает импорты, находки и пути к данным.
-
-    Дерево обходится стеком, а не рекурсией: формула из тысяч слагаемых (код от sympy)
-    иначе упирается в лимит рекурсии Python.
-    """
-
+class _Visitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.imports: list[ImportRef] = []
         self.findings: list[Finding] = []
@@ -158,52 +100,63 @@ class _Visitor:
         self.seeded = False
         self.cli_line = 0
         self.outputs: set[str] = set()
+        self._context: list[str] = []
 
-    def run(self, tree: ast.AST) -> None:
-        stack: list[tuple[ast.AST, Context]] = [(tree, ())]
-        while stack:
-            node, context = stack.pop()
-            handler = getattr(self, f"visit_{type(node).__name__}", _children)
-            stack.extend(reversed(handler(node, context)))
+    def _kind(self, default: str) -> str:
+        if "optional" in self._context:
+            return "optional"
+        if "if" in self._context:
+            return "conditional"
+        return default
 
-    def visit_Import(self, node: ast.Import, context: Context) -> list:
-        self.imports.extend(ImportRef(alias.name, node.lineno, _kind(context)) for alias in node.names)
-        return []
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.imports.append(ImportRef(alias.name, node.lineno, self._kind("static")))
 
-    def visit_ImportFrom(self, node: ast.ImportFrom, context: Context) -> list:
-        kind = "relative" if node.level else _kind(context)
-        self.imports.append(ImportRef(node.module or "", node.lineno, kind, node.level))
-        return []
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.level:
+            self.imports.append(ImportRef(node.module or "", node.lineno, "relative", node.level))
+        elif node.module:
+            self.imports.append(ImportRef(node.module, node.lineno, self._kind("static")))
 
-    def visit_Try(self, node: ast.Try, context: Context) -> list:
+    def visit_Try(self, node: ast.Try) -> None:
         guarded = any(_catches_import_error(h) for h in node.handlers)
-        inner = (*context, "optional" if guarded else "try")
-        return [*((child, inner) for child in (*node.body, *node.handlers)),
-                *((child, context) for child in (*node.orelse, *node.finalbody))]
+        self._context.append("optional" if guarded else "try")
+        for child in [*node.body, *node.handlers]:
+            self.visit(child)
+        self._context.pop()
+        for child in [*node.orelse, *node.finalbody]:
+            self.visit(child)
 
     visit_TryStar = visit_Try
 
-    def visit_If(self, node: ast.If, context: Context) -> list:
+    def visit_If(self, node: ast.If) -> None:
         if _is_main_guard(node.test):
             self.has_main_guard = True
-            return _children(node, context)
-        inner = (*context, "if")
-        return [(node.test, context), *((child, inner) for child in (*node.body, *node.orelse))]
+            self.generic_visit(node)
+            return
+        self.visit(node.test)
+        self._context.append("if")
+        for child in [*node.body, *node.orelse]:
+            self.visit(child)
+        self._context.pop()
 
-    def visit_Call(self, node: ast.Call, context: Context) -> list:
-        parts = _dotted(node.func).split(".")
-        last, owners = parts[-1], {p.lower() for p in parts[:-1]}
+    def visit_Call(self, node: ast.Call) -> None:
+        dotted = _dotted(node.func)
+        parts = dotted.split(".")
+        last = parts[-1] if parts else ""
+        owners = {p.lower() for p in parts[:-1] if p and p != "()"}
         if isinstance(node.func, ast.Attribute):
             self.method_calls.add(last)
-        if last == "import_module" or parts == ["__import__"]:
+        if last == "import_module" or dotted == "__import__":
             self._dynamic_import(node)
-        if last in RANDOM_CALLS and owners & RANDOM_OWNERS:
+        if last in RANDOM_CALLS and (owners & RANDOM_OWNERS or any("random" in o for o in owners)):
             self.random_line = self.random_line or node.lineno
         if last in SEED_CALLS and (node.args or node.keywords):
             self.seeded = True
-        if last in OUTPUT_CALLS or (parts == ["open"] and _opens_for_write(node)):
-            self.outputs.update(_output_names(node))
-        return _children(node, context)
+        if last in OUTPUT_CALLS or (dotted == "open" and _opens_for_write(node)):
+            self.outputs.update(a.value for a in node.args if isinstance(a, ast.Constant))
+        self.generic_visit(node)
 
     def _dynamic_import(self, node: ast.Call) -> None:
         arg = node.args[0] if node.args else None
@@ -214,50 +167,34 @@ class _Visitor:
             source = ast.unparse(arg) if arg is not None else ""
             self.findings.append(Finding("dynamic_unresolved", node.lineno, source))
 
-    def visit_Attribute(self, node: ast.Attribute, context: Context) -> list:
-        if node.attr == "argv" and _dotted(node) == "sys.argv":
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if _dotted(node) == "sys.argv":
             self.cli_line = self.cli_line or node.lineno
-        return _children(node, context)
+        self.generic_visit(node)
 
-    def visit_JoinedStr(self, node: ast.JoinedStr, context: Context) -> list:
-        """Части f-строки — не имена файлов, но абсолютный путь в её начале виден сразу."""
-        head = node.values[0] if node.values else None
-        if isinstance(head, ast.Constant) and ABSOLUTE_PATH.match(str(head.value)):
-            self.findings.append(Finding("absolute_path", node.lineno, ast.unparse(node)))
-        return [(part, context) for part in node.values if not isinstance(part, ast.Constant)]
-
-    def visit_Constant(self, node: ast.Constant, context: Context) -> list:
+    def visit_Constant(self, node: ast.Constant) -> None:
         value = node.value
-        if isinstance(value, str) and "\n" not in value and 2 < len(value) < 260:
-            if ABSOLUTE_PATH.match(value):
-                self.findings.append(Finding("absolute_path", node.lineno, value))
-            elif _is_data_name(value):
-                self.data_refs.append((value, node.lineno))
-        return []
+        if not isinstance(value, str) or "\n" in value or not 2 < len(value) < 260:
+            return
+        if ABSOLUTE_PATH.match(value):
+            self.findings.append(Finding("absolute_path", node.lineno, value))
+        elif value.lower().endswith(DATA_EXTENSIONS) and " " not in value.strip():
+            self.data_refs.append((value, node.lineno))
 
 
 def _min_python(tree: ast.AST) -> tuple[int, int]:
     found = [SYNTAX_MIN_PYTHON[type(n)] for n in ast.walk(tree) if type(n) in SYNTAX_MIN_PYTHON]
-    return max(found, default=NO_REQUIREMENT)
+    return max(found, default=(3, 6))
 
 
-def _unreadable(path: str, finding: Finding, pip_hints: tuple[str, ...] = (),
-                cell_lines: tuple[tuple[int, int], ...] = ()) -> FileScan:
-    return FileScan(path, (), (finding,), (), frozenset(), NO_REQUIREMENT, False, pip_hints, cell_lines)
-
-
-def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
-                cell_lines: tuple[tuple[int, int], ...] = ()) -> FileScan:
+def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = ()) -> FileScan:
     try:
         tree = ast.parse(text, filename=path)
-    except COMPLEXITY_ERRORS:
-        finding = Finding("too_complex", 0, "очень глубокая вложенность выражений")
-        return _unreadable(path, finding, pip_hints, cell_lines)
-    except SYNTAX_ERRORS as exc:
-        finding = Finding("syntax_error", getattr(exc, "lineno", None) or 0, getattr(exc, "msg", None) or str(exc))
-        return _unreadable(path, finding, pip_hints, cell_lines)
+    except SyntaxError as exc:
+        finding = Finding("syntax_error", exc.lineno or 0, exc.msg)
+        return FileScan(path, (), (finding,), (), frozenset(), (3, 6), False, pip_hints)
     visitor = _Visitor()
-    visitor.run(tree)
+    visitor.visit(tree)
     findings = list(visitor.findings)
     if visitor.random_line and not visitor.seeded:
         findings.append(Finding("unseeded_random", visitor.random_line, ""))
@@ -273,83 +210,28 @@ def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
         min_python=_min_python(tree),
         has_main_guard=visitor.has_main_guard,
         pip_hints=pip_hints,
-        cell_lines=cell_lines,
     )
 
 
-def _parses(code: str) -> bool:
-    try:
-        ast.parse(code)
-    except (*SYNTAX_ERRORS, *COMPLEXITY_ERRORS):
-        return False
-    return True
-
-
-def _notebook_cells(text: str) -> list[tuple[int, str]] | None:
-    """(номер ячейки, исходный текст) для код-ячеек; None — файл не похож на ноутбук."""
+def scan_notebook(path: str, text: str) -> FileScan:
+    """Код-ячейки .ipynb склеиваются; строки-магии (!pip, %matplotlib) вырезаются, но !pip install запоминается."""
     try:
         cells = json.loads(text).get("cells", [])
-    except (ValueError, AttributeError, RecursionError):
-        return None
-    if not isinstance(cells, list):
-        return None
-    found = []
-    for number, cell in enumerate(cells, start=1):
-        source = cell.get("source", "") if isinstance(cell, dict) and cell.get("cell_type") == "code" else None
-        if isinstance(source, list):
-            source = "".join(part for part in source if isinstance(part, str))
-        if isinstance(source, str):
-            found.append((number, source))
-    return found
-
-
-def _pip_requirements(args: str) -> list[str]:
-    """Пакеты из «pip install …»: опции и их значения, файлы, ссылки и пути пропускаются."""
-    try:
-        tokens = shlex.split(args, comments=True)
-    except ValueError:
-        tokens = args.split()
-    return [token for previous, token in zip(["", *tokens], tokens)
-            if previous not in PIP_VALUE_OPTIONS and PIP_REQUIREMENT.match(token)
-            and not token.lower().endswith(LOCAL_FILE_SUFFIXES)]
-
-
-def _cell_code(source: str) -> tuple[list[str], list[str]] | None:
-    """Строки ячейки как Python и пакеты из !pip install; None — ячейка не на Python (%%bash, %%html…).
-
-    Строки-магии (!ls, %matplotlib) заменяются пустыми, чтобы номера строк не сдвигались.
-    """
-    rows = source.splitlines()
-    first = rows[0].strip() if rows else ""
-    if first.startswith("%%") and first[2:].partition(" ")[0] not in PYTHON_CELL_MAGICS:
-        return None
-    hints = []
-    for row in rows:
-        if magic := PIP_MAGIC.match(row):
-            hints += _pip_requirements(magic.group(1))
-    lines = ["\n" if row.lstrip().startswith(("!", "%", "?")) else row + "\n" for row in rows]
-    return lines, hints
-
-
-def scan_notebook(path: str, text: str) -> FileScan:
-    """Код-ячейки .ipynb разбираются по отдельности: ячейка с синтаксисом IPython не прячет импорты
-    остальных, а места в отчёте указывают номер ячейки и строку в ней."""
-    cells = _notebook_cells(text)
-    if cells is None:
-        return _unreadable(path, Finding("syntax_error", 0, "некорректный JSON ноутбука"))
-    code, cell_lines, hints, findings = [], [], [], []
-    for number, source in cells:
-        parsed = _cell_code(source)
-        if parsed is None:
+    except (json.JSONDecodeError, AttributeError):
+        broken = Finding("syntax_error", 0, "некорректный JSON ноутбука")
+        return FileScan(path, (), (broken,), (), frozenset(), (3, 6), False)
+    lines, hints = [], []
+    for cell in cells:
+        if cell.get("cell_type") != "code":
             continue
-        lines, cell_hints = parsed
-        hints += cell_hints
-        if not _parses("".join(lines)):
-            findings.append(Finding("cell_syntax_error", 0, f"ячейка {number}"))
-            continue
-        code += lines
-        cell_lines += [(number, row) for row in range(1, len(lines) + 1)]
-    scan = scan_source(path, "".join(code), tuple(hints), tuple(cell_lines))
-    if hints:
-        findings.append(Finding("notebook_magic", 0, " ".join(hints)))
-    return replace(scan, findings=scan.findings + tuple(findings))
+        source = cell.get("source", "")
+        for line in (source if isinstance(source, list) else source.splitlines(True)):
+            magic = PIP_MAGIC.match(line)
+            if magic:
+                hints.extend(t for t in magic.group(1).split() if not t.startswith("-"))
+            is_magic = line.lstrip().startswith(("!", "%", "?"))
+            lines.append("\n" if is_magic else line.rstrip("\n") + "\n")
+    scan = scan_source(path, "".join(lines), tuple(hints))
+    if not hints:
+        return scan
+    return replace(scan, findings=scan.findings + (Finding("notebook_magic", 0, " ".join(hints)),))
