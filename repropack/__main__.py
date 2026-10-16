@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import __version__
 from .analysis import analyze
-from .intake import IntakeError, read_directory, read_upload
+from .intake import IntakeError, read_directory, read_file
 from .packer import LEVELS, PackOptions, build_zip, default_requirements
 
 
@@ -22,8 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        files = (read_directory(args.source) if args.source.is_dir()
-                 else read_upload([(args.source.name, args.source.read_bytes())]))
+        files = read_directory(args.source) if args.source.is_dir() else read_file(args.source)
     except (IntakeError, OSError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1

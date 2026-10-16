@@ -4,6 +4,7 @@
 """
 
 import io
+import stat
 import struct
 import unicodedata
 import zipfile
@@ -21,7 +22,10 @@ EOCD_SIZE = 22
 MAX_ZIP_COMMENT = 0xFFFF
 ENTRY_COUNT_OFFSET = 10  # число записей в конце каталога: 2 байта, смещение от сигнатуры
 ENTRY_COUNT = struct.Struct("<H")
-INVISIBLE_CHARS = set("\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+# Управляющие (Cc), невидимые и смена направления текста (Cf: U+200B, U+FEFF, U+202E), разрывы строк (Zl, Zp)
+HIDDEN_CATEGORIES = {"Cc", "Cf", "Zl", "Zp"}
+# Имена устройств Windows: с любым расширением и в любом регистре такой файл там не создать
+WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"{port}{n}" for port in ("COM", "LPT") for n in "0123456789¹²³")}
 JUNK_PARTS = {
     "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", ".idea", ".vscode",
     ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache", "node_modules", "__MACOSX",
@@ -34,12 +38,16 @@ ENCRYPTED_FLAG = 0x1
 ALLOWED_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
 READ_CHUNK_BYTES = 1024 * 1024
 UTF8_FLAG = 0x800
-# Что бросает zipfile на повреждённых данных, неподдерживаемом сжатии или пароле
-ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
+# Что бросает zipfile на повреждённых данных, неподдерживаемом сжатии или пароле; ValueError (в том числе
+# UnicodeDecodeError) и OverflowError — на испорченных смещениях и именах
+ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, ValueError,
+                   OverflowError)
 
 
-class IntakeError(ValueError):
-    """Загрузку нельзя принять (небезопасный путь, превышен лимит, неверный формат)."""
+class IntakeError(Exception):
+    """Загрузку нельзя принять (небезопасный путь, превышен лимит, неверный формат).
+
+    Не ValueError: ошибки zipfile ловятся как ValueError, и своя ошибка не должна теряться среди них."""
 
 
 def _safe_path(raw: str) -> str | None:
@@ -47,8 +55,8 @@ def _safe_path(raw: str) -> str | None:
 
     Буквы приводятся к NFC: macOS хранит «й» и «ё» разложенными, и без этого «данные_й.csv» из архива
     не совпало бы с тем же именем в коде."""
-    # Управляющие и невидимые символы смены направления текста: «x\u202eyp.txt» выглядит как «xtxt.py»
-    if any(ord(ch) < 32 or 0x7f <= ord(ch) <= 0x9f or ch in INVISIBLE_CHARS for ch in raw):
+    # Невидимые символы: «x\u202eyp.txt» выглядит как «xtxt.py», «a\u200b.py» — как «a.py»
+    if any(unicodedata.category(ch) in HIDDEN_CATEGORIES for ch in raw):
         raise IntakeError(f"Управляющие или невидимые символы в имени файла: {raw!r}")
     path = PurePosixPath(unicodedata.normalize("NFC", raw).replace("\\", "/"))
     # «:» в любой части пути — на Windows это поток NTFS («a/C:evil.py»); точку и пробел в конце Windows отрезает
@@ -59,6 +67,8 @@ def _safe_path(raw: str) -> str | None:
         return None
     if path.name in JUNK_NAMES or path.suffix in JUNK_SUFFIXES or path.name.startswith(APPLE_DOUBLE_PREFIX):
         return None
+    if any(part.split(".")[0].rstrip(" ").upper() in WINDOWS_RESERVED for part in path.parts):
+        raise IntakeError(f"Имя зарезервировано в Windows (CON, NUL, COM1…), там такой файл не создать: {raw!r}")
     return str(path)
 
 
@@ -112,8 +122,8 @@ def read_zip(data: bytes) -> dict[str, bytes]:
                           "уберите их из архива")
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise IntakeError("Файл не является корректным ZIP-архивом") from exc
+    except ZIP_READ_ERRORS as exc:
+        raise IntakeError("Файл не является корректным ZIP-архивом или повреждён") from exc
     # Служебные файлы (.git, .venv, __pycache__) не распаковываются и не считаются в лимиты:
     # проект с историей git не должен упираться в лимит числа файлов
     entries = [(path, info) for info in archive.infolist() if not info.is_dir()
@@ -134,6 +144,8 @@ def read_zip(data: bytes) -> dict[str, bytes]:
 def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, budget: int) -> bytes:
     if info.flag_bits & ENCRYPTED_FLAG:
         raise IntakeError("Архив защищён паролем — загрузите его без пароля")
+    if stat.S_ISLNK(info.external_attr >> 16):  # распаковщик создал бы ссылку, например, на ~/.ssh
+        raise IntakeError(f"{info.filename!r} в архиве — символическая ссылка: положите в архив сам файл")
     if info.compress_type not in ALLOWED_COMPRESSION:
         raise IntakeError(f"Не удалось распаковать {info.filename!r}: сжат неподдерживаемым методом — пересоздайте архив обычным ZIP")
     try:
@@ -188,25 +200,31 @@ def read_upload(uploads: list[tuple[str, bytes]], keep_paths: bool = False) -> d
     return files
 
 
-def _stays_inside(file: Path, root: Path) -> bool:
-    """Ссылка из папки на файл вне неё (например, ~/.aws/credentials) — не часть проекта и не читается."""
-    return file.resolve().is_relative_to(root)
-
-
 def read_directory(root: Path) -> dict[str, bytes]:
     """Для CLI и демо-проектов: читает папку с теми же фильтрами и лимитами, что и архив.
 
-    Лимиты проверяются по ходу чтения, чтобы случайно указанная огромная папка не попала в память целиком.
+    Ссылки (например, на ~/.netrc) и FIFO не читаются: первые ведут из проекта, вторые читались бы вечно.
+    Размер берётся из lstat до чтения, чтобы случайно указанная огромная папка не попала в память целиком.
+    rglob не заходит в ссылки на папки, поэтому проверки самого файла достаточно.
     """
     files, total = {}, 0
-    real_root = root.resolve()
     for file in sorted(root.rglob("*")):
         path = _safe_path(file.relative_to(root).as_posix())
-        if path is None or not _stays_inside(file, real_root) or not file.is_file():
+        if path is None or not stat.S_ISREG((info := file.lstat()).st_mode):
             continue
-        files[path] = file.read_bytes()
-        total += len(files[path])
-        if len(files) > MAX_FILES or total > MAX_UNPACKED_BYTES:
+        total += info.st_size
+        if len(files) >= MAX_FILES or total > MAX_UNPACKED_BYTES:
             raise IntakeError(f"Папка слишком большая: больше {MAX_FILES} файлов "
                               f"или {MAX_UNPACKED_BYTES // 1024 // 1024} МБ")
+        files[path] = file.read_bytes()
     return files
+
+
+def read_file(file: Path) -> dict[str, bytes]:
+    """Для CLI: один файл или ZIP. Тип и размер проверяются до чтения: FIFO или /dev/zero читались бы вечно."""
+    info = file.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise IntakeError(f"«{file}» — не обычный файл и не папка")
+    if info.st_size > MAX_ARCHIVE_BYTES:
+        raise IntakeError(f"Файл больше {MAX_ARCHIVE_BYTES // 1024 // 1024} МБ")
+    return read_upload([(file.name, file.read_bytes())])

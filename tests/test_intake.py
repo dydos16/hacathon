@@ -1,5 +1,8 @@
 import io
 import os
+import stat
+import struct
+import sys
 import tomllib
 import unicodedata
 import zipfile
@@ -8,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from repropack import intake
+from repropack.__main__ import main
 from repropack.intake import IntakeError, read_directory, read_upload
 from repropack.secrets import find_secrets, is_secret_file, redact, redact_bytes
 
@@ -213,3 +217,94 @@ def test_archive_bigger_than_the_old_20_mb_limit_is_accepted():
     big = os.urandom(25 * 1024 * 1024)  # случайные байты не сжимаются: архив тоже ~25 МБ
     files = read_upload([("project.zip", make_zip({"main.py": b"print(1)", "data/big.bin": big}))])
     assert len(files["data/big.bin"]) == len(big)
+
+
+def zip64_offset_beyond_ssize_t() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        info = zipfile.ZipInfo("main.py")
+        info.extra = struct.pack("<HHQ", 1, 8, 2**64 - 1)  # поле zip64 со смещением локального заголовка
+        archive.writestr(info, b"print(1)")
+    data = bytearray(buffer.getvalue())
+    offset = data.find(b"PK\x01\x02") + 42  # смещение в записи каталога: 0xFFFFFFFF — «смотри zip64»
+    data[offset:offset + 4] = b"\xff\xff\xff\xff"
+    return bytes(data)
+
+
+@pytest.mark.parametrize("archive", [
+    patch_headers(PLAIN, 4, 6, b"\xff\x00"),  # версия формата 25.5: zipfile бросал NotImplementedError
+    patch_headers(PLAIN, 6, 8, b"\x00\x08").replace(b"main.py", b"m\xffin.py"),  # флаг UTF-8 у не-UTF-8 имени
+    PLAIN[:6] + b"\x00\x08" + PLAIN[8:].replace(b"main.py", b"m\xffin.py", 1),  # то же только в локальном заголовке
+    PLAIN[:-6] + b"\x00\x00\x00\x7f" + PLAIN[-2:],  # смещение каталога за концом файла: ValueError при чтении
+    zip64_offset_beyond_ssize_t(),  # OverflowError при переходе к заголовку
+], ids=["version", "utf8-name", "local-utf8-name", "offset", "zip64-offset"])
+def test_malformed_archive_is_rejected_with_intake_error_not_a_crash(archive, tmp_path, capsys):
+    """Аудит: испорченный архив ронял страницу и печатал трассировку в CLI — UnicodeDecodeError,
+    NotImplementedError, ValueError и OverflowError из zipfile не превращались в IntakeError."""
+    with pytest.raises(IntakeError, match="ZIP|повреждён"):
+        read_upload([("p.zip", archive)])
+    (tmp_path / "p.zip").write_bytes(archive)
+    assert main([str(tmp_path / "p.zip"), "-o", str(tmp_path / "out.zip")]) == 1
+    assert "Ошибка" in capsys.readouterr().err
+
+
+def zip_with_symlink(name: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("main.py", b"print(1)")
+        link = zipfile.ZipInfo(name)
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, b"/home/user/.netrc")
+    return buffer.getvalue()
+
+
+def test_zip_symlinks_and_names_equal_after_nfc_are_rejected():
+    """Аудит: запись-ссылка (S_IFLNK) принималась как обычный файл, а одинаковые после NFC имена
+    молча затирали друг друга. Ссылки внутри служебных папок (.venv/bin/python) по-прежнему пропускаются."""
+    with pytest.raises(IntakeError, match="ссылк"):
+        read_upload([("p.zip", zip_with_symlink("notes.txt"))])
+    assert read_upload([("p.zip", zip_with_symlink(".venv/bin/python"))]) == {"main.py": b"print(1)"}
+    nfc, nfd = (unicodedata.normalize(form, "опыт_й.py") for form in ("NFC", "NFD"))
+    with pytest.raises(IntakeError, match="несколько"):
+        read_upload([("p.zip", make_zip({nfc: b"a", nfd: b"b"}))])
+
+
+@pytest.mark.parametrize("name", ["a​b.py", "a‎.py", "﻿main2.py", "da­ta.csv", "a b.py",
+                                  "CON.py", "nul.txt", "lib/Com1.py", "LPT9", "aux.tar.gz", "prn/x.py"])
+def test_invisible_characters_and_windows_device_names_are_rejected(name):
+    """Аудит: имена с невидимыми символами (категории Cc и Cf: U+200B, U+200E, U+FEFF, мягкий перенос) выглядят
+    в интерфейсе как другие файлы, а CON, NUL, COM1… нельзя создать на Windows — пакет там не распаковать."""
+    with pytest.raises(IntakeError):
+        read_upload([("p.zip", make_zip({name: b"", "main.py": b""}))])
+    with pytest.raises(IntakeError):
+        read_upload([(f"lab/{name}", b""), ("lab/main.py", b"")], keep_paths=True)
+
+
+def test_names_that_only_start_like_windows_devices_are_accepted():
+    names = ["console.py", "com10.py", "auxiliary.py", "null.py", "lpt.py", "contrast.csv"]
+    assert set(read_upload([("p.zip", make_zip({n: b"" for n in names}))])) == set(names)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="символические ссылки и FIFO в Windows недоступны")
+def test_directory_skips_links_and_special_files(tmp_path: Path):
+    """Аудит: read_directory шёл по ссылкам (в том числе на ~/.netrc) — теперь ссылки и FIFO не читаются."""
+    (tmp_path / "main.py").write_text("print(1)")
+    (tmp_path / "copy.py").symlink_to(tmp_path / "main.py")
+    os.mkfifo(tmp_path / "pipe.py")
+    assert read_directory(tmp_path) == {"main.py": b"print(1)"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="FIFO в Windows недоступны")
+def test_cli_checks_file_type_and_size_before_reading(tmp_path: Path, monkeypatch, capsys):
+    """Аудит: CLI читал FIFO, указанный аргументом (и зависал), а файлы — целиком до проверки размера."""
+    os.mkfifo(tmp_path / "pipe.py")
+    (tmp_path / "main.py").write_text("print(1)")
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail(f"{self.name} прочитан до проверки"))
+    assert main([str(tmp_path / "pipe.py")]) == 1
+    assert "не обычный файл" in capsys.readouterr().err
+    monkeypatch.setattr(intake, "MAX_ARCHIVE_BYTES", 5)
+    assert main([str(tmp_path / "main.py")]) == 1
+    assert "больше" in capsys.readouterr().err
+    monkeypatch.setattr(intake, "MAX_UNPACKED_BYTES", 5)
+    with pytest.raises(IntakeError, match="слишком большая"):
+        read_directory(tmp_path)
