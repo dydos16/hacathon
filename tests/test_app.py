@@ -2,6 +2,7 @@
 
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 APP = str(Path(__file__).parent.parent / "app.py")
+# Эмодзи и пиктограммы: символы, дингбаты, «вариант-эмодзи» U+FE0F. Стрелки и типографика («», —, →) — не они
+EMOJI = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
 CLEAN_PROJECT = {
     "main.py": b"import numpy\n\nif __name__ == '__main__':\n    print(numpy.zeros(1))\n",
     "requirements.txt": b"numpy==1.26.4\n", "README.md": b"# demo\n", "LICENSE": b"MIT\n",
@@ -47,8 +50,13 @@ def texts(elements) -> str:
     return " | ".join(e.value for e in elements)
 
 
+def plain(label: str) -> str:
+    """Подпись без цветовой разметки Streamlit: «:red[Критично: 5]» → «Критично: 5»."""
+    return re.sub(r"^:\w+\[(.*)\]$", r"\1", label)
+
+
 def widget(elements, label: str):
-    return next(e for e in elements if e.label == label)
+    return next(e for e in elements if plain(e.label) == label)
 
 
 NOTEBOOK = json.dumps({"cells": [{"cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
@@ -64,14 +72,43 @@ def test_demo_project_flow_renders_without_errors(demo, critical, verdict):
     metrics = {m.label: m.value for m in app.metric}
     assert metrics["Критичных проблем"] == critical
     assert verdict in texts([*app.error, *app.warning, *app.success])
-    assert [s.value for s in app.subheader][-1] == "5. Пакет воспроизводимости"
+    assert [s.value for s in app.subheader][-1] == "Содержимое пакета"
     assert app.download_button
 
 
-def test_start_screen_asks_for_upload():
+def test_start_screen_has_no_sidebar_and_no_colored_callouts():
     app = start()
     assert not app.exception
-    assert "Загрузите файлы" in app.info[0].value
+    assert not app.sidebar.children and not app.info and not app.success
+    assert app.checkbox[0].label == "Читать версии пакетов из среды, где запущен repro-packer"
+
+
+def test_interface_has_no_emoji():
+    for app in (start(), open_demo("messy_lab_project")):
+        preview = {m.value for tab in app.tabs for m in tab.markdown}
+        shown = [*(e.value for e in [*app.title, *app.subheader, *app.caption, *app.error, *app.warning, *app.success]),
+                 *(m.value for m in app.markdown if m.value not in preview),
+                 *(e.label for e in [*app.expander, *app.metric]), *(b.proto.label for b in app.download_button)]
+        assert shown and not [text for text in shown if EMOJI.search(text)]
+    assert "**подтвердить вручную**" in app.tabs[2].markdown[0].value  # вместо ⚠ в REPORT.md
+
+
+def test_summary_with_downloads_comes_before_the_details():
+    blocks = list(open_demo("messy_lab_project").main.children.values())
+    card = next(i for i, b in enumerate(blocks) if b.type == "flex_container" and b.get("download_button"))
+    issues = next(i for i, b in enumerate(blocks) if b.type == "subheader" and b.value == "Что мешает воспроизвести")
+    assert card < issues
+    assert "Критичных проблем" in [m.label for m in blocks[card].get("metric")]
+
+
+def test_dependency_table_is_compact_and_puts_decisions_first():
+    editor = open_demo("messy_lab_project").dataframe[0]
+    assert list(editor.proto.column_order) == ["Включить", "Модуль", "Пакет PyPI", "Версия", "Подтверждено",
+                                               "Примечание"]
+    confirmed = list(editor.value["Подтверждено"])
+    assert confirmed == sorted(confirmed) and not confirmed[0]  # сначала строки, где нужно решение
+    notes = dict(zip(editor.value["Модуль"], editor.value["Примечание"]))
+    assert notes["jwt"] == "неоднозначно: PyJWT / jwt" and notes["numpy"] == "справочник · версия: requirements.txt"
 
 
 def test_start_screen_says_what_to_upload_what_comes_out_and_that_code_is_not_run():
@@ -84,12 +121,14 @@ def test_messy_demo_numbers_fit_in_one_row_of_metrics():
     app = open_demo("messy_lab_project")
     assert {m.label: m.value for m in app.metric} == {
         "Файлов": "7", "Внешних пакетов": "12", "Критичных проблем": "5", "Нужно подтвердить": "4"}
-    assert any(e.label.startswith("Стандартная библиотека: 4 · локальные модули: 1") for e in app.expander)
+    assert any(e.label.startswith("Все модули проекта:") and e.label.endswith("стандартная библиотека: 4 · локальные: 1")
+               for e in app.expander)
 
 
 def test_each_issue_shows_where_it_is_and_what_to_do():
     app = open_demo("messy_lab_project")
-    assert {"Критично: 5", "Нужно решение: 6", "К сведению: 6"} <= {e.label for e in app.expander}
+    labels = {e.label for e in app.expander}
+    assert {":red[Критично: 5]", ":orange[Нужно решение: 6]", ":gray[К сведению: 6]"} <= labels
     shown = texts(app.markdown)
     assert "**Абсолютный путь «/Users/ivan/lab/raw_2024.csv»** · `analysis.py:24`" in shown
     assert "→ такой путь есть только на компьютере автора — замените на относительный" in shown
@@ -156,8 +195,7 @@ def test_archive_name_is_shown_and_cyrillic_project_name_is_explained():
 
 def test_requirements_and_report_can_be_downloaded_separately():
     app = open_demo("numpy_pandas_script")
-    assert [b.proto.label for b in app.download_button] == ["⬇️ Скачать пакет (ZIP)", "requirements.txt",
-                                                            "REPORT.md"]
+    assert [b.proto.label for b in app.download_button] == ["Скачать пакет (ZIP)", "requirements.txt", "REPORT.md"]
 
 
 def test_package_summary_shows_data_and_what_was_hidden():
@@ -171,13 +209,13 @@ def test_package_summary_shows_data_and_what_was_hidden():
 
 def test_messy_project_shows_unconfirmed_packages_and_needs_arguments():
     app = open_demo("messy_lab_project")
-    assert "Не подтверждены" in texts(app.warning)
+    assert "Не подтверждены" in texts(app.caption)
     assert "читает аргументы командной строки" in texts(app.caption)
 
 
 def test_project_without_external_packages_says_so():
     app = open_demo("local_module_project")
-    assert "Внешних зависимостей не найдено" in texts(app.info)
+    assert "Внешних пакетов не найдено" in texts(app.caption)
 
 
 def test_python_choice_is_explained_on_screen():
@@ -194,7 +232,7 @@ def test_uploaded_single_file_is_analyzed_and_named_after_it():
 
 def test_clean_uploaded_project_has_no_problems():
     app = upload(("clean.zip", make_zip({f"clean/{p}": data for p, data in CLEAN_PROJECT.items()})))
-    assert "Проблем не найдено" in texts(app.success)
+    assert "Проблем не найдено" in texts(app.caption)
     assert "Явных препятствий нет" in texts(app.success)
     assert app.text_input[1].value == "clean"
 
@@ -231,3 +269,4 @@ def test_preview_shows_every_generated_file_from_the_archive():
     assert "numpy-pandas-script-repro/project/main.py" in app.tabs[-1].code[0].value
     assert "numpy" in app.tabs[1].code[0].value
     assert "Файлов в архиве" in texts(app.caption)
+    assert not EMOJI.search(app.tabs[2].markdown[0].value)  # REPORT.md во вкладке тоже без ⚠

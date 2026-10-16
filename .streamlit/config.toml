@@ -8,10 +8,19 @@ toolbarMode = "minimal"
 [browser]
 gatherUsageStats = false
 
-# Синий акцент вместо красного по умолчанию: красный в интерфейсе означает только «критично».
-# Заданы обе темы — переключатель светлой/тёмной и системная тема продолжают работать.
-[theme.light]
-primaryColor = "#1c6fd1"
-
-[theme.dark]
-primaryColor = "#4a9eff"
+# Светлая тема: на проекторе тёмная выцветает. Один акцент — тёмно-синий; красный в интерфейсе
+# означает только «критично». Шрифты — встроенные в Streamlit (с кириллицей, работают без интернета).
+[theme]
+base = "light"
+primaryColor = "#1f4f8f"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f5f8"
+textColor = "#1b2230"
+linkColor = "#1f4f8f"
+borderColor = "#d8dde5"
+showWidgetBorder = true
+baseRadius = "small"
+dataframeHeaderBackgroundColor = "#f3f5f8"
+# Код и пути — нейтральным цветом, а не зелёным по умолчанию: цвет в интерфейсе означает только уровень проблемы
+codeTextColor = "#1b2230"
+codeBackgroundColor = "#eef1f5"
