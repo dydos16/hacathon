@@ -21,6 +21,9 @@ JUNK_SUFFIXES = {".pyc", ".pyo"}
 JUNK_NAMES = {".DS_Store", "Thumbs.db"}
 APPLE_DOUBLE_PREFIX = "._"  # метаданные macOS рядом с файлом, на внешних дисках и в tar
 ENCRYPTED_FLAG = 0x1
+# Только методы, у которых степень сжатия ограничена: bzip2 и lzma сжимают нули в тысячи раз
+ALLOWED_COMPRESSION = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+READ_CHUNK_BYTES = 1024 * 1024
 UTF8_FLAG = 0x800
 # Что бросает zipfile на повреждённых данных, неподдерживаемом сжатии или пароле
 ZIP_READ_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
@@ -85,17 +88,35 @@ def read_zip(data: bytes) -> dict[str, bytes]:
         raise IntakeError(f"В архиве больше {MAX_FILES} файлов")
     if sum(info.file_size for _, info in entries) > MAX_UNPACKED_BYTES:
         raise IntakeError("Распакованный архив слишком большой (возможна zip-бомба)")
-    return _strip_common_root({path: _read_entry(archive, info) for path, info in entries})
+    files: dict[str, bytes] = {}
+    budget = MAX_UNPACKED_BYTES
+    for path, info in entries:
+        files[path] = _read_entry(archive, info, budget)
+        budget -= len(files[path])
+    return _strip_common_root(files)
 
 
-def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, budget: int) -> bytes:
     if info.flag_bits & ENCRYPTED_FLAG:
         raise IntakeError("Архив защищён паролем — загрузите его без пароля")
+    if info.compress_type not in ALLOWED_COMPRESSION:
+        raise IntakeError(f"Не удалось распаковать {info.filename!r}: сжат неподдерживаемым методом — пересоздайте архив обычным ZIP")
     try:
-        return archive.read(info)
+        with archive.open(info) as stream:
+            return _read_limited(stream, budget)
     except ZIP_READ_ERRORS as exc:
-        raise IntakeError(f"Не удалось распаковать {info.filename!r}: архив повреждён "
-                          "или сжат неподдерживаемым методом") from exc
+        raise IntakeError(f"Не удалось распаковать {info.filename!r}: архив повреждён") from exc
+
+
+def _read_limited(stream, limit: int) -> bytes:
+    """Читает по частям и считает реальные байты: заголовок архива может соврать о размере."""
+    chunks, total = [], 0
+    while chunk := stream.read(READ_CHUNK_BYTES):
+        total += len(chunk)
+        if total > limit:
+            raise IntakeError("Распакованный архив слишком большой (возможна zip-бомба)")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _merge(files: dict[str, bytes], added: dict[str, bytes]) -> dict[str, bytes]:
