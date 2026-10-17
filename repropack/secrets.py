@@ -64,7 +64,9 @@ TOKENS = [
 ]
 # Присваивания — на тексте в нижнем регистре (имена пишут как угодно: API_KEY, Api_Key), но без (?i): с ним re
 # сравнивает каждый символ через lower() и работает в десять раз медленнее
-PASSWORD = r"(?:passw(?:or)?d|pwd|(?<![a-z0-9])pass)"  # pass — отдельная часть имени (DB_PASS), но не compass
+# pass — отдельная часть имени (DB_PASS), но не compass. Проверка — после литерала, а не перед ним: каждая ветка
+# начинается с буквы, и re перескакивает к возможным началам; ветка с lookbehind впереди замедляла поиск впятеро
+PASSWORD = r"(?:passw(?:or)?d|pwd|pass(?<![a-z0-9]pass))"
 KEYWORD = rf"(?:api_?key|access_?key|private_?key|secret(?:_?key)?|token|{PASSWORD[3:-1]})"
 ASSIGNMENTS = [
     # pip: --index-url https://ТОКЕН@host — у частных индексов токен часто стоит вместо имени пользователя
@@ -79,8 +81,9 @@ ASSIGNMENTS = [
     # иначе в NLP-коде вымарывались бы unk_token = "unknown" и подобные
     ("пароль в коде", re.compile(
         PASSWORD + r"""\b\\?["']?[ \t]*[:=][ \t]*\\?["'](?![<{$%*]|your)([^"'\s\\][^"'\\\n]{5,}?)\\?["']""")),
-    # Строка подключения Azure: «…;AccountKey=base64==;…», Service Bus — SharedAccessKey
-    ("ключ Azure", re.compile(r"(?:accountkey|sharedaccesskey)=([^;\"'\s]{16,})")),
+    # Строка подключения Azure: «…;AccountKey=base64==;…», Service Bus — SharedAccessKey. По шаблону на имя:
+    # литерал в начале — быстрый поиск (см. TOKENS)
+    *(("ключ Azure", re.compile(rf"{name}=([^;\"'\s]{{16,}})")) for name in ("accountkey", "sharedaccesskey")),
     # kubeconfig: закрытый ключ клиента в base64 без кавычек — в том числе в .yaml рядом с кодом
     ("ключ из kubeconfig", re.compile(r"client-key-data[ \t]*:[ \t]*[\"']?([a-z0-9+/=]{16,})")),
 ]
