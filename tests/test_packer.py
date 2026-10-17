@@ -279,3 +279,18 @@ def test_values_must_match_entirely_without_newlines_or_unicode_digits(python, p
     analysis = analyze({"main.py": b"import numpy\n"})
     with pytest.raises(ValueError):
         render_package(analysis, PackOptions("p", "main.py", python, (Requirement(package, version),)))
+
+
+
+def test_docker_image_runs_project_as_unprivileged_user():
+    """Проект коллеги в контейнере работает не от root: apt-get и pip — от root, затем USER перед CMD."""
+    analysis = analyze({"main.py": b"import cv2\n"})
+    options = PackOptions("p", "main.py", "3.11", default_requirements(analysis))
+    dockerfile = render_package(analysis, options)["Dockerfile"]
+    lines = dockerfile.splitlines()
+    user = lines.index("USER repro")
+    assert "useradd" in dockerfile and "chown repro /app" in dockerfile  # /app — его: код может писать результаты
+    assert "COPY --chown=repro:repro project/ ." in lines
+    assert lines.index("RUN pip install --no-cache-dir -r requirements.txt") < user
+    assert next(i for i, line in enumerate(lines) if "apt-get install" in line) < user
+    assert lines[-1].startswith("CMD ") and user < len(lines) - 1
