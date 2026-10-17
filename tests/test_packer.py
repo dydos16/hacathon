@@ -3,6 +3,7 @@ import json
 import platform
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -201,10 +202,14 @@ def test_verify_sh_finds_the_required_python_without_the_python_variable(tmp_pat
     """Коллеге не нужно писать PYTHON=python3.11: на macOS python3 — это системный 3.9, а 3.11 стоит рядом."""
     archive, root = pack("local_module_project", python_version="3.11")
     archive.extractall(tmp_path)
+    bin_dir = tmp_path / "bin"
     for name in installed:
-        fake_python(tmp_path / "bin", name, name.removeprefix("python") if name != "python3" else "3.9")
-    subprocess.run(["sh", "verify.sh"], cwd=tmp_path / root, capture_output=True,
-                   env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"})
+        fake_python(bin_dir, name, name.removeprefix("python") if name != "python3" else "3.9")
+    # Только подделки и утилиты скрипта: настоящий python3.12 из /usr/bin (Ubuntu на CI) не должен найтись
+    for tool in ("dirname", "date", "tee", "rm"):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    subprocess.run([shutil.which("sh"), "verify.sh"], cwd=tmp_path / root, capture_output=True,
+                   env={"PATH": str(bin_dir)})
     log = (tmp_path / root / "verify_log.txt").read_text()
     assert f"найден: Python {chosen}.0" in log
     assert ("ВНИМАНИЕ" in log) is (chosen != "3.11")
