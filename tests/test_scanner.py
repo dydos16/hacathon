@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -269,7 +270,7 @@ def test_imports_inside_exec_strings_are_found_and_computed_exec_is_flagged():
     assert kinds(scan) == {"torch": "dynamic", "yaml": "dynamic"}
     assert [(f.code, f.detail) for f in scan.findings] == [
         ("exec_import", "torch"), ("exec_import", "yaml"), ("exec_unresolved", "open('cfg.py').read()")]
-    assert codes(scan_source("a.py", "exec('import (')\neval(expr)\n")) == set()
+    assert codes(scan_source("a.py", "exec('import (')\neval(expr)\n")) == {"exec_syntax_error"}
 
 
 def test_scanning_never_executes_code(tmp_path: Path):
@@ -277,3 +278,73 @@ def test_scanning_never_executes_code(tmp_path: Path):
     source = f"open({str(marker)!r}, 'w').write('x')\nimport os\nos.system('echo pwned')\n"
     scan_source("evil.py", source)
     assert not marker.exists()
+
+
+def test_dotted_import_split_by_backslashes_is_skipped_like_a_long_line(monkeypatch):
+    """Аудит: длинная строка пропускалась до ast.parse, но в «import a\\ .a\\ .a…» каждая физическая строка
+    короткая, а парсер Python хранит все префиксы имени: 40 000 частей — 1,3 ГБ памяти. Строки, склеенные
+    обратной косой чертой, считаются одной."""
+    monkeypatch.setattr(scanner, "MAX_LINE_CHARS", 50)
+    monkeypatch.setattr(scanner, "LONG_STATEMENT_TOKENS", 20)
+    scan = scan_source("gen.py", "import numpy\nimport a" + "\\\n.a" * 30 + "\nx = 'in.csv'\n")
+    assert [ref.module for ref in scan.imports] == ["numpy"]
+    assert [(f.code, f.line) for f in scan.findings] == [("long_statement", 2)]
+    assert scan.data_refs == (("in.csv", 33),)
+
+
+def test_exec_strings_and_notebook_cells_get_the_long_line_guard(monkeypatch):
+    """Аудит: строка из exec и ячейка ноутбука шли прямо в ast.parse, мимо пропуска длинных строк: «import a.a.a…»
+    на мегабайт там съедал гигабайты памяти. Теперь все пути разбора проходят одну проверку."""
+    monkeypatch.setattr(scanner, "MAX_LINE_CHARS", 50)
+    monkeypatch.setattr(scanner, "LONG_STATEMENT_TOKENS", 20)
+    longest, real = [], ast.parse
+    monkeypatch.setattr(ast, "parse", lambda text, *args, **kwargs: longest.append(
+        max(map(len, text.splitlines()), default=0)) or real(text, *args, **kwargs))
+    statement = "import " + ".".join(["a"] * 40)
+    source = "exec(\n" + "\n".join(repr(statement[i:i + 20]) for i in range(0, len(statement), 20)) + ")\n"
+    exec_scan = scan_source("a.py", source)
+    cell_scan = scan_notebook("n.ipynb", notebook(statement + "\nimport numpy\n"))
+    assert max(longest) <= 50  # ни один разбор не получил длинную строку
+    assert exec_scan.imports == () and codes(exec_scan) == {"long_statement"}
+    assert kinds(cell_scan) == {"numpy": "static"} and codes(cell_scan) == {"long_statement"}
+
+
+def test_oversized_notebook_is_skipped_before_reading_its_json(monkeypatch):
+    """Аудит: json.loads разбирал ноутбук любого размера до всех проверок — «[{}, {}, …]» на десятки мегабайт
+    занимает гигабайты. Ноутбук больше лимита не читается вовсе."""
+    monkeypatch.setattr(scanner, "MAX_NOTEBOOK_CHARS", 100, raising=False)
+    text = notebook("import numpy\n" * 20)
+    monkeypatch.setattr(json, "loads", lambda *args, **kwargs: pytest.fail("json.loads на огромном ноутбуке"))
+    scan = scan_notebook("big.ipynb", text)
+    assert codes(scan) == {"too_large"} and scan.imports == () and "выводами" in scan.findings[0].detail
+
+
+def test_notebook_code_over_the_limit_is_not_parsed_cell_by_cell(monkeypatch):
+    """Аудит: каждая ячейка разбиралась через ast до проверки размера кода — 12 ноутбуков по 0,9 МБ кода
+    занимали 10 с и 445 МБ. Размер проверяется до разбора; пакеты из !pip install всё равно учтены."""
+    monkeypatch.setattr(scanner, "MAX_CODE_CHARS", 50)
+    parsed, real = [], ast.parse
+    monkeypatch.setattr(ast, "parse", lambda text, *args, **kwargs: parsed.append(text) or real(text, *args, **kwargs))
+    scan = scan_notebook("n.ipynb", notebook("!pip install seaborn\nimport numpy\nx = 1\n", "import scipy\n" * 4))
+    assert codes(scan) == {"too_large", "notebook_magic"} and parsed == []
+    assert scan.pip_hints == ("seaborn",) and scan.code_chars == 76
+
+
+def test_dynamic_import_of_a_string_that_is_not_a_module_name_is_unresolved():
+    """Аудит: importlib.import_module('my module') давал «пакет» с пробелом в имени, и сборка пакета падала.
+    Строка считается именем модуля, только если каждая часть — идентификатор; иначе — «вычисляемое имя»."""
+    source = ("import importlib\nimportlib.import_module('my module')\nimportlib.import_module('a\\nb')\n"
+              "__import__('os.')\nimportlib.import_module('')\nimportlib.import_module('.models', __package__)\n"
+              "importlib.import_module('модуль.sub')\n")
+    scan = scan_source("a.py", source)
+    assert kinds(scan) == {"importlib": "static", ".models": "dynamic", "модуль.sub": "dynamic"}
+    assert [f.detail for f in scan.findings if f.code == "dynamic_unresolved"] == [
+        "'my module'", "'a\\nb'", "'os.'", "''"]
+
+
+def test_exec_of_a_string_with_a_syntax_error_is_reported():
+    """Аудит: exec('…') со строкой, которая не разбирается, молча пропускался — импорты из неё терялись
+    без предупреждения."""
+    scan = scan_source("a.py", "exec('import (')\neval('1 +')\nexec('import os')\n")
+    assert [(f.code, f.line, f.detail) for f in scan.findings] == [
+        ("exec_syntax_error", 1, "'import ('"), ("exec_syntax_error", 2, "'1 +'"), ("exec_import", 3, "os")]

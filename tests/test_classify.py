@@ -1,13 +1,19 @@
+import ast
 import json
+import re
+import time
 from importlib import metadata
 from pathlib import Path
 
 import pytest
 
+from repropack import classify as classify_module
+from repropack import scanner
 from repropack.analysis import analyze
-from repropack.classify import MAPPING_FILE, parse_declared
+from repropack.classify import MAPPING_FILE, classify, parse_declared, parse_declared_checked
 from repropack.intake import read_directory
 from repropack.packer import PACKAGE_NAME, default_requirements
+from repropack.scanner import NO_REQUIREMENT, FileScan, ImportRef
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
@@ -379,3 +385,58 @@ def test_requirements_saved_by_windows_tools_are_read():
     for data in (b"\xef\xbb\xbf" + text.encode(), text.encode("utf-16")):
         assert {n: d.spec for n, d in parse_declared({"requirements.txt": data})[0].items()} == {
             "numpy": "==1.26.4", "pandas": "==2.2.0"}
+
+
+def scans_importing(paths: list[str], *modules: str) -> list[FileScan]:
+    imports = tuple(ImportRef(module, line, "static") for line, module in enumerate(modules, start=1))
+    return [FileScan(path, imports, (), (), frozenset(), NO_REQUIREMENT, False) for path in paths]
+
+
+def test_many_files_with_many_imports_are_classified_in_seconds():
+    """Аудит: каждое использование модуля сверялось со всеми путями проекта — 2000 файлов по 40 импортов
+    занимали сервер почти минуту. Пути проверяются по индексу, и время растёт линейно."""
+    paths = [f"pkg{i % 50}/f{i}.py" for i in range(2000)]
+    modules = [f"lib{j}" for j in range(20)]
+    files = {**dict.fromkeys(paths, b""), "pkg7/lib3.py": b"", "src/lib4/__init__.py": b""}
+    start = time.perf_counter()
+    deps = {d.module: d.category for d in classify(scans_importing(paths, *modules), files)}
+    assert time.perf_counter() - start < 3  # было ~20 с, теперь доли секунды
+    assert deps == {m: "local" if m in ("lib3", "lib4") else "external" for m in modules}
+
+
+def test_long_dotted_module_name_checks_a_bounded_number_of_prefixes(monkeypatch):
+    """Аудит: для «a.a.a…» из importlib.import_module или exec строились все префиксы имени — квадрат от числа
+    частей, десятки секунд на одну строку. Имена пакетов короткие: проверяются только первые части."""
+    calls = []
+    real = classify_module.normalize
+    monkeypatch.setattr(classify_module, "normalize", lambda name: calls.append(name) or real(name))
+    deps = classify(scans_importing(["main.py"], ".".join(["a"] * 5000), "google.cloud.storage.blob"), {})
+    assert [d.module for d in deps] == ["a", "google.cloud.storage"]
+    assert len(calls) < 40  # было 5000 вызовов на строках длиной до 10 000 символов
+
+
+def test_setup_py_gets_the_same_long_line_guard_as_code(monkeypatch):
+    """Аудит: setup.py шёл в ast.parse напрямую, мимо пропуска длинных строк: «import a\\ .a\\ …» на 160 КБ
+    занимал 1,8 ГБ памяти. Теперь он проходит ту же проверку, что и код проекта."""
+    monkeypatch.setattr(scanner, "MAX_LINE_CHARS", 50)
+    monkeypatch.setattr(scanner, "LONG_STATEMENT_TOKENS", 20)
+    longest, real = [], ast.parse
+    monkeypatch.setattr(ast, "parse", lambda text, *args, **kwargs: longest.append(
+        max(map(len, re.sub(r"\\\n", "", text).splitlines()), default=0)) or real(text, *args, **kwargs))
+    setup_py = b"from setuptools import setup\nimport a" + b"\\\n.a" * 30 + b"\nsetup(install_requires=['numpy'])\n"
+    assert list(parse_declared({"setup.py": setup_py})[0]) == ["numpy"]
+    assert max(longest) <= 50  # склеенная строка «import a.a.a…» до парсера не дошла
+
+
+def test_oversized_dependency_files_are_reported_not_read(monkeypatch):
+    """Аудит: у файлов зависимостей не было лимита — requirements.txt на 10 МБ разбирался 1,6 с и занимал 340 МБ,
+    а в загрузку помещается 600 МБ таких файлов. Файл больше 1 МБ и всё сверх 10 МБ на проект — «не разобран»."""
+    monkeypatch.setattr(classify_module, "MAX_CODE_CHARS", 30)
+    monkeypatch.setattr(classify_module, "MAX_TOTAL_CODE_CHARS", 50, raising=False)
+    files = {"a/requirements.txt": b"numpy==1.26.4\npandas\n",                         # 21 байт
+             "b/requirements.txt": b"requests==2.31.0\nflask==3.0.0\nclick==8.1\n",  # 41 — больше лимита файла
+             "c/requirements.txt": b"scipy==1.11\n",                                   # 12, в сумме 33
+             "d/requirements.txt": b"torch==2.0.0\nrich\n"}                           # 18 — сверх лимита проекта
+    declared, _, unreadable = parse_declared_checked(files)
+    assert sorted(declared) == ["numpy", "pandas", "scipy"]
+    assert unreadable == ("b/requirements.txt", "d/requirements.txt")
