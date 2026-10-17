@@ -64,6 +64,12 @@ def test_token_in_a_binary_file_stops_the_build_instead_of_leaking():
     assert read_text(blob, "state.pkl") == "" and scan("weights.npy", b"\x93NUMPY\x01\x00" + bytes(1000)) == []
 
 
+def test_random_binary_bytes_do_not_look_like_a_password_in_url():
+    """CI Windows: в 50 МБ случайных байт шаблон «://…:…@» находил «пароль» — в двоичных файлах его нет."""
+    data = b"\x00\x01://\x80\x81:\x90\x91\x92\x93\x94@\x00" * 1000
+    assert scan("weights.npy", data) == []
+
+
 # --- F4: пропуски в поиске секретов ---
 
 @pytest.mark.parametrize("name, line, needle", [

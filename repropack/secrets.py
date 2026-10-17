@@ -99,8 +99,11 @@ PLAIN_ASSIGNMENT = re.compile(
 LITERAL_JOIN = re.compile(r"""\\?["'][ \t]*(?:\\?\r?\n[ \t]*)?\\?["']""")
 SPLIT_KEYS = [re.compile(rf"{prefix}(?<!\w{prefix})[\w-]*(?:{LITERAL_JOIN.pattern}[\w-]+)+")
               for prefix in ("sk", "rk_", "gh", "github_pat_", "hf_", "xox", "AKIA", "ASIA", "AIza", "pypi-")]
-# Те же шаблоны токенов для байтов двоичного файла: все шаблоны — ASCII, \w в байтах — только латиница и цифры
-BINARY_TOKENS = [(kind, re.compile(pattern.pattern.encode(), pattern.flags & ~re.UNICODE)) for kind, pattern in TOKENS]
+# Те же шаблоны токенов для байтов двоичного файла: все шаблоны — ASCII, \w в байтах — только латиница и цифры.
+# Кроме пароля в адресе: между «://», «:» и «@» он пропускает почти любые байты и на случайных данных находит
+# «секрет» (50 МБ весов .npy — несколько раз); у остальных токенов длинный узнаваемый префикс
+BINARY_TOKENS = [(kind, re.compile(pattern.pattern.encode(), pattern.flags & ~re.UNICODE))
+                 for kind, pattern in TOKENS if kind != "пароль в адресе подключения"]
 IN_BINARY = " в двоичном файле"
 REDACTED = "<REDACTED>"
 MASK = "…"  # значение не показываем даже частично: часть пароля тоже секрет
