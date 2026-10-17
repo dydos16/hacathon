@@ -1,5 +1,6 @@
 """Сборка пакета: requirements.txt, README, Dockerfile, отчёт, verify-скрипты → ZIP."""
 
+import hashlib
 import io
 import json
 import posixpath
@@ -55,6 +56,8 @@ PACKAGE_FILES = {
 }
 TREE_NOTE_COLUMN = 40  # символов: пояснения в дереве выровнены в одну колонку
 TREE_LIMIT = 40  # строк: у большого проекта дерево обрезается, полный состав — в самом архиве
+SLUG_LIMIT = 40  # символов: тег Docker-образа — до 128, имя папки — до 255 байт
+SLUG_HASH = 8  # шестнадцатеричных знаков sha256 исходного имени
 ENV_TEMPLATE_HEADER = ("# Создано repro-packer вместо исключённого файла с секретами: значения автора удалены.\n"
                        "# Впишите свои значения и переименуйте файл в .env\n")
 
@@ -155,7 +158,13 @@ def ps_quote(text: str) -> str:
 
 
 def slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
+    """Имя папки в архиве и Docker-образа: латиница, цифры и «-». Если буквы потерялись (кириллица, пустое имя)
+    или имя обрезано — добавляется хэш исходного имени: иначе «опыт 1» и «опыт 2» дали бы один образ «project»."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if slug and name.isascii() and len(slug) <= SLUG_LIMIT:
+        return slug
+    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:SLUG_HASH]
+    return f"{slug[:SLUG_LIMIT].strip('-') or 'project'}-{digest}"
 
 
 def _tree_lines(node: dict, parent: str, notes: dict[str, str]) -> list[tuple[str, str]]:

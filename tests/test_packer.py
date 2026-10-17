@@ -15,10 +15,12 @@ from repropack.__main__ import main
 from repropack.analysis import analyze
 from repropack.intake import read_directory
 from repropack.packer import (TREE_LIMIT, PackOptions, Requirement, build_zip, default_requirements, package_tree,
-                              render_package, requirements_text)
+                              render_package, requirements_text, slugify)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
 CI_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml"
+# Имя образа для «docker build -t»: строчные латинские буквы и цифры через «-»
+DOCKER_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
 
 
@@ -309,3 +311,14 @@ def test_ci_actions_are_pinned_to_commit_sha_and_uv_to_exact_version():
     assert re.search(r"pip install uv==[0-9]+\.[0-9]+\.[0-9]+\n", workflow)
     assert "\npermissions:\n  contents: read\n" in workflow
     assert workflow.count("persist-credentials: false") == workflow.count("actions/checkout@")
+
+
+
+def test_slug_is_unique_for_non_ascii_and_long_names_and_valid_as_docker_image_name():
+    """Кириллица и пустое имя не сливаются в «project», длинное имя не даёт папку длиннее 255 байт и тег длиннее 128."""
+    names = ["эксперимент", "опыт", "", "Опыт v2", "опыт v2", "x" * 300, "x" * 301, "é" * 300]
+    slugs = [slugify(name) for name in names]
+    assert len(set(slugs)) == len(names), slugs
+    assert all(DOCKER_NAME.fullmatch(slug) and len(slug) <= 64 for slug in slugs), slugs
+    assert slugify("numpy_pandas_script") == "numpy-pandas-script" and slugify("My Lab!") == "my-lab"
+    assert slugify("эксперимент") == slugify("эксперимент")  # имя архива не меняется от сборки к сборке
