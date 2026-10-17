@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 # Тестам нужно только прочитать код: токен с правом записи им не выдаём
+# Действия — по полному SHA коммита (тег можно перевесить на чужой код), uv — точной версией
 permissions:
   contents: read
 
@@ -26,10 +27,10 @@ jobs:
       # Сквозной тест «пакет → чистый venv → запуск» с установкой numpy/pandas из PyPI
       REPRO_NETWORK_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -45,13 +46,13 @@ jobs:
     env:
       REPRO_NETWORK_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.11"
-      - run: python -m pip install uv
+      - run: python -m pip install uv==0.12.21
       - run: uv pip install --system --resolution lowest-direct -e ".[dev]"
       - run: python -c "import streamlit, jinja2, pytest; print(streamlit.__version__, jinja2.__version__, pytest.__version__)"
       - run: python -m pytest -v
@@ -63,10 +64,10 @@ jobs:
     env:
       REPRO_DOCKER_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -86,10 +87,10 @@ jobs:
     env:
       REPRO_BROWSER_TESTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
           cache: pip

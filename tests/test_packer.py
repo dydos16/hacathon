@@ -1,6 +1,7 @@
 import io
 import json
 import platform
+import re
 import runpy
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from repropack.packer import (TREE_LIMIT, PackOptions, Requirement, build_zip, d
                               render_package, requirements_text)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
+CI_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml"
 FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
 
 
@@ -294,3 +296,16 @@ def test_docker_image_runs_project_as_unprivileged_user():
     assert lines.index("RUN pip install --no-cache-dir -r requirements.txt") < user
     assert next(i for i, line in enumerate(lines) if "apt-get install" in line) < user
     assert lines[-1].startswith("CMD ") and user < len(lines) - 1
+
+
+
+def test_ci_actions_are_pinned_to_commit_sha_and_uv_to_exact_version():
+    """Тег действия (actions/checkout@v4) можно перевесить на другой код, а полный SHA коммита — нельзя.
+
+    uv ставится точной версией, токен — только на чтение и не остаётся в .git/config."""
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    uses = re.findall(r"uses:\s*(\S+)", workflow)
+    assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", action) for action in uses), uses
+    assert re.search(r"pip install uv==[0-9]+\.[0-9]+\.[0-9]+\n", workflow)
+    assert "\npermissions:\n  contents: read\n" in workflow
+    assert workflow.count("persist-credentials: false") == workflow.count("actions/checkout@")
