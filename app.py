@@ -301,7 +301,7 @@ def run_options(analysis: Analysis, name: str, project: str) -> tuple[str, str, 
                               disabled=notebook, key=f"args-{project}")
     project_name = cols[3].text_input("Название проекта", value=name, key=f"name-{project}").strip() or name
     cols[3].caption(f"Имя архива: `{slugify(project_name)}-repro.zip`"
-                    + ("" if project_name.isascii() else " — нелатинские буквы в имя файла не попадают"))
+                    + ("" if project_name.isascii() else " — нелатинские буквы в имя файла не попадают, хэш в конце отличает его от других проектов"))
     if is_auxiliary(entry):  # то же правило, по которому такие файлы стоят в конце списка
         st.warning(f"{code(entry)} похож на тест или служебный файл — эксперимент обычно запускают другим скриптом.")
     notes = [f"Точка входа: {entry_reason(scan)}.",
