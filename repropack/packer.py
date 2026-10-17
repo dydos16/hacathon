@@ -14,10 +14,10 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from . import __version__
-from .analysis import Analysis, decode
+from .analysis import Analysis
 from .classify import LOCAL_ENV, PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
 from .markdown import code, escape
-from .secrets import env_names, file_text, find_secrets, redact, redact_bytes
+from .secrets import env_names, find_secrets, read_text, redact, redact_bytes
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
@@ -262,20 +262,19 @@ def env_templates(analysis: Analysis) -> dict[str, str]:
     names: dict[str, list[str]] = {}
     for path in analysis.secret_files:
         target = posixpath.join(posixpath.dirname(path), ".env.example")
-        names.setdefault(target, []).extend(env_names(path, decode(analysis.files[path])))
+        names.setdefault(target, []).extend(env_names(path, read_text(analysis.files[path])))
     return {target: ENV_TEMPLATE_HEADER + "".join(f"{name}=\n" for name in dict.fromkeys(found))
             for target, found in names.items() if found and target not in analysis.files}
 
 
 def _project_files(analysis: Analysis) -> dict[str, bytes]:
-    """Исходники для пакета: без файлов-секретов, с замаскированными секретами в тексте."""
-    with_secrets = {h.path for h in analysis.secrets}
-    sources = {path: redact_bytes(path, data) if path in with_secrets else data
+    """Исходники для пакета: без файлов-секретов; каждый текстовый файл вымаран, а не только те, где анализ нашёл."""
+    sources = {path: redact_bytes(path, data)
                for path, data in analysis.files.items() if path not in analysis.secret_files}
-    # Страховка: найденное, но не вымаранное значение не уходит в пакет — сборка останавливается
-    if leaked := [path for path in with_secrets if find_secrets(path, file_text(sources[path])[0])]:
-        raise ValueError(f"секрет в {', '.join(sorted(leaked))} не удалось заменить на <REDACTED> — "
-                         "уберите его из файла вручную")
+    # Страховка: значение, оставшееся после вымарывания в любом текстовом файле, не уходит в пакет
+    if leaked := [path for path, data in sources.items() if find_secrets(path, read_text(data))]:
+        raise ValueError(f"секрет в {', '.join(sorted(redact(p, plain=True) for p in leaked))} не удалось заменить "
+                         "на <REDACTED> — уберите его из файла вручную")
     return {**sources, **{path: text.encode() for path, text in env_templates(analysis).items()}}
 
 
@@ -286,6 +285,11 @@ def build_zip(analysis: Analysis, options: PackOptions) -> bytes:
     generated = {name: text.encode("utf-8-sig" if name.endswith(".ps1") else "utf-8")
                  for name, text in render_package(analysis, options).items()}
     entries = {**{f"project/{p}": data for p, data in _project_files(analysis).items()}, **generated}
+    # Последний рубеж: ключ из аргументов запуска, таблицы зависимостей или имени файла не попадает в пакет
+    if leaked := sorted(redact(name, plain=True) for name, data in entries.items()
+                        if find_secrets(name, name) or name in generated and find_secrets(name, read_text(data))):
+        raise ValueError(f"похоже на секрет (ключ, токен или пароль) в {', '.join(leaked)} — уберите его из "
+                         "аргументов запуска, таблицы зависимостей или имени файла и передайте коллеге отдельно")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(entries.items()):

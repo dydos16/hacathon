@@ -10,7 +10,7 @@ from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB
                        parse_declared_checked)
 from .markdown import escape
 from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source, skipped_scan
-from .secrets import SecretHit, env_names, file_text, find_secrets, is_secret_file, redact
+from .secrets import SecretHit, env_names, find_secrets, is_secret_file, read_text, redact
 
 DEFAULT_PYTHON = (3, 11)
 ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "train.py")
@@ -329,7 +329,7 @@ def _hygiene(files: dict[str, bytes], data_found: list[str], has_declared: bool)
 
 
 def _excluded_detail(path: str, data: bytes) -> str:
-    names = env_names(path, decode(data))
+    names = env_names(path, read_text(data))
     if names:
         return (f"коллеге нужны свои значения переменных {', '.join(names)}: они перечислены без значений "
                 "в .env.example пакета — впишите значения и переименуйте файл в .env")
@@ -373,8 +373,9 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     declared, python_hint, unreadable = parse_declared_checked(files)
     python, python_reason, python_issues = _suggest_python(scans, deps, python_hint)
     secret_files = tuple(p for p in files if is_secret_file(p))
+    # Каждый файл, где по содержимому текст (расширение не важно); двоичные пропускаются без декодирования
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
-                    for hit in find_secrets(p, file_text(data)[0]))
+                    for hit in find_secrets(p, read_text(data)))
     data_found, data_missing = _data_refs(scans, files)
     data_missing = [(clean(ref), where) for ref, where in data_missing]
     hygiene = _hygiene(files, data_found, bool(declared))
