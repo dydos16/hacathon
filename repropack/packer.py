@@ -32,7 +32,7 @@ CATEGORIES = {"stdlib": "стандартная библиотека", "removed"
 LEVELS = {"high": "критично", "medium": "нужно решение", "info": "к сведению"}
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?$")
 # ASCII-цифры целиком: «$» пропускает завершающий перевод строки, а \d — цифры вроде «３.１１»
-PYTHON_VERSION = re.compile(r"[0-9]+\.[0-9]+")
+PYTHON_VERSION = re.compile(r"[0-9]{1,2}\.[0-9]{1,3}")  # длина ограничена: из неё строится список версий для verify
 VERSION_OPERATORS = ("==", ">=", "<=", "~=", "!=", ">", "<")
 NOTEBOOK_RUNNERS = ("nbconvert", "ipykernel")
 # Системные библиотеки Debian, без которых пакет не ставится или не импортируется в образе python:*-slim

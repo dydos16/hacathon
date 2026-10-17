@@ -142,3 +142,19 @@ def test_environment_versions_need_a_local_server_or_explicit_permission(monkeyp
     assert not AppTest.from_file(APP, default_timeout=30).run().checkbox  # сервер открыт в сеть — галочки нет
     monkeypatch.setenv("REPRO_LOCAL", "1")
     assert AppTest.from_file(APP, default_timeout=30).run().checkbox  # владелец разрешил явно
+
+
+# --- Новый код verify-скриптов (поиск нужного Python, коммит 0b93a69) ---
+
+@pytest.mark.parametrize("version", ["3.11; touch PWN", "$(id).1", "3.11'; calc; '", "3.11\n", "３.１１",
+                                     "3." + "9" * 5000])
+def test_python_version_cannot_inject_into_the_interpreter_search(version):
+    """Версия попадает в «for version in …» verify.sh и в @('…') verify.ps1: только цифры и точка, короткая."""
+    with pytest.raises(ValueError, match="Некорректная версия Python"):
+        packer.render_package(analyze(MAIN), PackOptions("p", "main.py", version, ()))
+
+
+def test_interpreter_search_lists_only_plain_versions():
+    generated = packer.render_package(analyze(MAIN), PackOptions("p", "main.py", "3.12", ()))
+    assert "  for version in 3.12 3.13 3.14; do" in generated["verify.sh"]
+    assert "@('3.12', '3.13', '3.14')" in generated["verify.ps1"]
