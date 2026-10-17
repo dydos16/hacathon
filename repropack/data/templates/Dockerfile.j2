@@ -11,4 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN useradd --create-home repro && chown repro /app
 COPY --chown=repro:repro project/ .
 USER repro
-CMD {{ cmd_json }}
+{% if docker_workdir %}WORKDIR {{ docker_workdir }}
+{% endif %}CMD {{ cmd_json }}

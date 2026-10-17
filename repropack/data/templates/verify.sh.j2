@@ -30,10 +30,11 @@ log "-- Установка зависимостей из requirements.txt"
 log "-- Точные версии сохранены в requirements.lock.txt"
 
 log {{ run_log_sh }}
-cd project || exit 1
-"../$VPY" {{ run_tail }} > ../run_output.txt 2>&1
+ROOT=$(pwd)
+cd {{ project_dir_sh }} || exit 1
+"$ROOT/$VPY" {{ run_tail }} > "$ROOT/run_output.txt" 2>&1
 code=$?
-cd ..
+cd "$ROOT" || exit 1
 tee -a "$LOG" < run_output.txt
 if [ "$code" -eq 0 ]; then
   log "РЕЗУЛЬТАТ: OK (код выхода 0)"

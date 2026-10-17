@@ -145,6 +145,20 @@ def requirements_text(reqs: tuple[Requirement, ...], created: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def run_dir(analysis: Analysis, entry_point: str) -> str:
+    """Папка запуска внутри project/. Относительный путь в open()/read_csv считается от текущей папки, а не от
+    скрипта: если данные точки входа лежат рядом с ней, а от корня проекта таких путей нет, — запуск из её папки.
+    Ноутбук nbconvert и так выполняет из его папки."""
+    folder = posixpath.dirname(entry_point)
+    scan = next((s for s in analysis.scans if s.path == entry_point), None)
+    if not folder or scan is None or entry_point.endswith(".ipynb"):
+        return ""
+    refs = [ref.replace("\\", "/") for ref, _ in scan.data_refs]
+    beside = any(posixpath.normpath(posixpath.join(folder, ref)) in analysis.files for ref in refs)
+    at_root = any(posixpath.normpath(ref) in analysis.files for ref in refs)
+    return folder if beside and not at_root else ""
+
+
 def run_parts(entry_point: str, run_args: str) -> list[str]:
     # Имя файла с «-» в начале python принял бы за ключ: «-copen(…)#.py» выполнил бы код из имени, а не скрипт
     entry = f"./{entry_point}" if entry_point.startswith("-") else entry_point
@@ -211,7 +225,10 @@ def python_candidates(version: str) -> list[str]:
 
 
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
-    parts = run_parts(options.entry_point, options.run_args)
+    workdir = run_dir(analysis, options.entry_point)
+    parts = run_parts(posixpath.relpath(options.entry_point, workdir) if workdir else options.entry_point,
+                      options.run_args)
+    project_dir = posixpath.join("project", workdir) if workdir else "project"
     system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs
               if normalize(r.package) in SYSTEM_PACKAGES]
     run_tail = shlex.join(parts)
@@ -228,6 +245,9 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
         "run_command_ps": redact(" ".join(["python", *map(ps_quote, parts)])),
         "run_tail_ps": " ".join(map(ps_quote, parts)),
         "run_log_sh": shlex.quote(run_log), "run_log_ps": ps_quote(run_log),
+        "project_dir_sh": shlex.quote(project_dir), "project_dir_ps": ps_quote(project_dir),
+        # $ в WORKDIR Docker подставил бы переменную окружения
+        "docker_workdir": f"/app/{workdir}".replace("$", "\\$") if workdir else "",
         "data_found": analysis.data_found, "data_missing": analysis.data_missing,
         "excluded": analysis.secret_files, "redacted": bool(analysis.secrets), "env_templates": env_templates(analysis),
         "key_issues": [i for i in analysis.issues if i.level != "info"], "issues": analysis.issues,

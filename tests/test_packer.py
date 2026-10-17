@@ -381,3 +381,20 @@ def test_user_text_cannot_become_markdown_in_readme_and_report():
     assert any("ird.py" in row for row in rows) and not any("evil" in row for row in rows)
     assert "evil\\|mod" in rendered["REPORT.md"]
     assert all(len(re.findall(r"(?<!\\)\|", row)) == 7 for row in rows), rows
+
+
+@pytest.mark.parametrize("files, workdir, entry", [
+    # Данные рядом со скриптом: из корня проекта «data/m.csv» не найти — запуск из папки скрипта
+    ({"exp/main.py": b'open("data/m.csv")\n', "exp/data/m.csv": b"1\n"}, "project/exp", "main.py"),
+    # Данные от корня проекта — запуск, как раньше, из корня
+    ({"exp/main.py": b'open("data/m.csv")\n', "data/m.csv": b"1\n"}, "project", "exp/main.py"),
+])
+def test_script_runs_from_the_folder_its_relative_data_paths_point_from(files, workdir, entry):
+    """Относительный путь в open()/read_csv считается от текущей папки, а не от скрипта: пакет демо-проекта внутри
+    репозитория падал у коллеги с FileNotFoundError, хотя анализ нашёл файл рядом со скриптом."""
+    rendered = render_package(analyze(files), PackOptions("p", "exp/main.py", "3.11", ()), "now")
+    assert f"cd {workdir} || exit 1" in rendered["verify.sh"] and f'"$ROOT/$VPY" {entry} >' in rendered["verify.sh"]
+    assert f"Push-Location '{workdir}'" in rendered["verify.ps1"] and f"& $VPy '{entry}'" in rendered["verify.ps1"]
+    assert f"cd {workdir}\npython {entry}\n" in rendered["README.md"]
+    assert ("WORKDIR /app/exp" in rendered["Dockerfile"]) is (workdir == "project/exp")
+    assert f'"python", "{entry}"' in rendered["Dockerfile"]

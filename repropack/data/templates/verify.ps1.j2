@@ -41,7 +41,7 @@ $Frozen = @(& $VPy -m pip freeze)
 Log "-- Точные версии сохранены в requirements.lock.txt"
 
 Log {{ run_log_ps }}
-Push-Location project
+Push-Location {{ project_dir_ps }}
 & $VPy {{ run_tail_ps }} 2>&1 | ForEach-Object { Log "$_" }
 $Code = $LASTEXITCODE
 Pop-Location
