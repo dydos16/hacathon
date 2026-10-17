@@ -339,5 +339,7 @@ def test_user_text_cannot_become_markdown_in_readme_and_report():
     for doc in ("README.md", "REPORT.md"):
         assert escape(name) in rendered[doc].splitlines()[0], rendered[doc].splitlines()[0]
     rows = [line for line in rendered["REPORT.md"].splitlines() if line.startswith("|")][2:]
-    assert any("evil" in row for row in rows) and any("ird.py" in row for row in rows)
+    # 'evil|mod' — не имя модуля: в таблицу не попадает, а в тексте проблемы экранирован
+    assert any("ird.py" in row for row in rows) and not any("evil" in row for row in rows)
+    assert "evil\\|mod" in rendered["REPORT.md"]
     assert all(len(re.findall(r"(?<!\\)\|", row)) == 7 for row in rows), rows
