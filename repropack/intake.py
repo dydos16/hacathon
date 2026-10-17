@@ -162,10 +162,29 @@ def _merge(files: dict[str, bytes], added: dict[str, bytes]) -> dict[str, bytes]
         raise IntakeError(f"Файл «{clash}» загружен дважды с разным содержимым — оставьте один вариант")
     _check_unique([*files, *(p for p in added if p not in files)])
     merged = {**files, **added}
-    if len(merged) > MAX_FILES or sum(map(len, merged.values())) > MAX_UNPACKED_BYTES:
+    _check_totals(len(merged), sum(map(len, merged.values())))
+    return merged
+
+
+def _check_totals(count: int, size: int) -> None:
+    if count > MAX_FILES or size > MAX_UNPACKED_BYTES:
         raise IntakeError(f"Загрузка слишком большая: больше {MAX_FILES} файлов "
                           f"или {MAX_UNPACKED_BYTES // 1024 // 1024} МБ в сумме")
-    return merged
+
+
+def _is_zip(name: str, keep_paths: bool) -> bool:
+    return name.lower().endswith(".zip") and not keep_paths
+
+
+def _upload_path(name: str, keep_paths: bool) -> str | None:
+    return _safe_path(name if keep_paths else PurePosixPath(name.replace("\\", "/")).name)
+
+
+def check_upload(uploads: list[tuple[str, int]], keep_paths: bool = False) -> None:
+    """Число и размер загрузки — по именам и размерам, до чтения байтов. Служебные файлы (.git, .venv)
+    не считаются, как и в read_upload."""
+    sizes = [size for name, size in uploads if _is_zip(name, keep_paths) or _upload_path(name, keep_paths)]
+    _check_totals(len(sizes), sum(sizes))
 
 
 def read_upload(uploads: list[tuple[str, bytes]], keep_paths: bool = False) -> dict[str, bytes]:
@@ -175,11 +194,9 @@ def read_upload(uploads: list[tuple[str, bytes]], keep_paths: bool = False) -> d
     общая папка верхнего уровня срезается, а ZIP внутри папки остаётся обычным файлом."""
     files: dict[str, bytes] = {}
     for name, data in uploads:
-        if name.lower().endswith(".zip") and not keep_paths:
+        if _is_zip(name, keep_paths):
             files = _merge(files, read_zip(data))
-            continue
-        path = _safe_path(name if keep_paths else PurePosixPath(name.replace("\\", "/")).name)
-        if path is not None:
+        elif (path := _upload_path(name, keep_paths)) is not None:
             files = _merge(files, {path: data})
     if keep_paths:
         files = _strip_common_root(files)

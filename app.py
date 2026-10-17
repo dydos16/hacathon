@@ -12,7 +12,7 @@ import streamlit as st
 
 from repropack.analysis import ENTRY_NAMES, Analysis, Issue, analyze, is_auxiliary
 from repropack.classify import LOCAL_ENV, Dependency
-from repropack.intake import IntakeError, read_directory, read_upload
+from repropack.intake import IntakeError, check_upload, read_directory, read_upload
 from repropack.markdown import code, escape
 from repropack.packer import (CATEGORIES, PACKAGE_NAME, VERSION_SPEC, PackOptions, Requirement, build_zip,
                               default_requirements, packaged_dependencies, slugify)
@@ -57,14 +57,29 @@ EDITOR_COLUMNS = {
 PREVIEW = {"README.md": "markdown", "requirements.txt": "text", "REPORT.md": "markdown", "Dockerfile": "dockerfile",
            "verify.sh": "bash", "verify.ps1": "powershell", "repro.json": "json"}
 PREVIEW_HEIGHT = 480  # px: длинный отчёт прокручивается внутри вкладки, а не растягивает страницу
+ANALYSIS_STATE = "analysis"  # ключ st.session_state: разбор текущей загрузки
 
 st.set_page_config(page_title="repro-packer", layout="wide")
 
 
-# Кэш ограничен: на общем сервере каждая загрузка (вместе с исключёнными .env) иначе жила бы в памяти вечно
-@st.cache_data(show_spinner="Статический разбор кода…", max_entries=16, ttl=3600)
-def cached_analysis(files: dict[str, bytes], use_local_env: bool) -> Analysis:
-    return analyze(files, use_local_env)
+def signature(files: dict[str, bytes]) -> str:
+    """Отпечаток загрузки; длина перед содержимым — «a.py»+«x» и «a.p»+«yx» не совпадут."""
+    digest = hashlib.sha256()
+    for path, data in sorted(files.items()):
+        digest.update(f"{path}\0{len(data)}\0".encode())
+        digest.update(data)
+    return digest.hexdigest()[:12]
+
+
+def session_analysis(files: dict[str, bytes], use_local_env: bool, key: str) -> Analysis:
+    """Разбор хранится в сессии посетителя, а не в общем кэше st.cache_data: байты загрузки (вместе
+    с исключённым .env и ключами в коде) живут не дольше самой загрузки и другим сессиям не достаются.
+    Одна запись на сессию: новая загрузка вытесняет прежнюю, а убранная или отклонённая — удаляет её."""
+    cached = st.session_state.get(ANALYSIS_STATE)
+    if cached is None or cached[0] != (key, use_local_env):
+        with st.spinner("Статический разбор кода…"):
+            cached = st.session_state[ANALYSIS_STATE] = (key, use_local_env), analyze(files, use_local_env)
+    return cached[1]
 
 
 def choose_source() -> tuple[dict[str, bytes], str] | None:
@@ -79,6 +94,8 @@ def choose_source() -> tuple[dict[str, bytes], str] | None:
                                accept_multiple_files="directory" if folder else True)
     if not uploads:
         return None
+    # Лимиты — по UploadedFile.size, до чтения: слишком большая загрузка не копируется в память целиком
+    check_upload([(u.name, u.size) for u in uploads], keep_paths=folder)
     files = read_upload([(u.name, u.getvalue()) for u in uploads], keep_paths=folder)
     if folder:  # имя загруженного файла — путь внутри папки, начиная с имени самой папки
         return files, PurePosixPath(uploads[0].name).parts[0]
@@ -324,6 +341,7 @@ def main() -> None:
     try:
         source = choose_source()
     except IntakeError as exc:
+        st.session_state.pop(ANALYSIS_STATE, None)
         st.error(f"Не удалось принять загрузку: {escape(str(exc))}")
         return
     # На общем сервере (REPRO_PUBLIC=1) версии «из среды» — это пакеты и ОС сервера, их не показываем посетителям
@@ -332,19 +350,20 @@ def main() -> None:
         help="Только при локальном запуске: версии берутся из importlib.metadata этой машины. "
              "Без согласия версии не читаются.")
     if source is None:
+        st.session_state.pop(ANALYSIS_STATE, None)
         show_start_screen()
         return
     files, name = source
-    analysis = cached_analysis(files, use_local_env)
+    key = signature(files)
+    analysis = session_analysis(files, use_local_env, key)
     if not analysis.entry_candidates:
         st.error("Нечего запускать: в загрузке только служебные файлы Python (`__init__.py`, `__main__.py`…). "
                  "Добавьте скрипт или ноутбук, который проводит эксперимент.")
         return
     summary = st.container(border=True, key="summary")  # заполняется в конце: учитывает правки таблицы
     show_issues(analysis)
-    signature = hashlib.sha256(b"".join(p.encode() + d for p, d in sorted(files.items()))).hexdigest()[:12]
-    requirements = dependency_editor(analysis, key=f"deps-{signature}-{use_local_env}")
-    entry, python, args, project_name = run_options(analysis, name, signature)
+    requirements = dependency_editor(analysis, key=f"deps-{key}-{use_local_env}")
+    entry, python, args, project_name = run_options(analysis, name, key)
     options = PackOptions(project_name, entry, python, requirements, args)
     package, error = build(analysis, options)
     with summary:
