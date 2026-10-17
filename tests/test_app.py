@@ -8,7 +8,10 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 from streamlit.testing.v1 import AppTest
+
+from repropack import analysis, intake
 
 APP = str(Path(__file__).parent.parent / "app.py")
 # Эмодзи и пиктограммы: символы, дингбаты, «вариант-эмодзи» U+FE0F. Стрелки и типографика («», —, →) — не они
@@ -299,3 +302,41 @@ def test_public_server_does_not_offer_reading_its_own_environment(monkeypatch):
     monkeypatch.setenv("REPRO_PUBLIC", "1")
     app = start()
     assert not app.exception and not app.checkbox
+
+
+def test_upload_limits_are_checked_before_the_files_are_read(monkeypatch):
+    """Аудит: интерфейс копировал в память каждый загруженный файл (getvalue) и только потом проверял
+    число файлов и их размер. Служебные файлы папки (.git) в лимит по-прежнему не входят."""
+    read = []
+    original = UploadedFile.getvalue
+    monkeypatch.setattr(UploadedFile, "getvalue", lambda self: read.append(self.name) or original(self))
+    for limit, value in (("MAX_FILES", 1), ("MAX_UNPACKED_BYTES", 8)):
+        with monkeypatch.context() as patch:
+            patch.setattr(intake, limit, value)
+            app = upload(("a.py", b"x = 1"), ("b.py", b"y = 2"))
+        assert "Загрузка слишком большая" in texts(app.error) and not read
+    monkeypatch.setattr(intake, "MAX_FILES", 2)
+    app = start()
+    app.radio[0].set_value("Папка проекта").run()
+    app.file_uploader[0].set_value([(f"lab/{name}", b"x = 1", "text/plain")
+                                    for name in ("main.py", "util.py", ".git/HEAD", ".git/config")]).run()
+    assert not app.exception and not app.error and app.metric
+
+
+def test_analysis_with_secrets_is_kept_in_the_session_not_in_a_shared_cache(monkeypatch):
+    """Аудит: st.cache_data держал разбор — байты всей загрузки вместе с исключённым .env и ключами в коде —
+    в общем кэше процесса (до 16 загрузок на час) и отдавал его другим сессиям. Теперь разбор живёт в сессии:
+    повторный запуск страницы его не пересчитывает, другая сессия считает заново, а убранная загрузка его удаляет."""
+    calls = []
+    original = analysis.analyze
+    monkeypatch.setattr(analysis, "analyze", lambda *args: calls.append(args) or original(*args))
+    project = (("main.py", b"print('session cache')\n"), (".env", b"API_KEY=not-a-real-key\n"))
+    app = upload(*project)
+    widget(app.text_input, "Аргументы запуска").set_value("--n 5").run()
+    assert len(calls) == 1
+    other = upload(*project)
+    assert len(calls) == 2 and "analysis" in other.session_state
+    other.file_uploader[0].set_value(None).run()  # файлы убраны — их разбор в сессии тоже не нужен
+    assert "analysis" not in other.session_state
+    app.file_uploader[0].set_value([("p.zip", b"not a zip", "application/zip")]).run()
+    assert "analysis" not in app.session_state
