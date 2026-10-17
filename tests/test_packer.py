@@ -322,3 +322,12 @@ def test_slug_is_unique_for_non_ascii_and_long_names_and_valid_as_docker_image_n
     assert all(DOCKER_NAME.fullmatch(slug) and len(slug) <= 64 for slug in slugs), slugs
     assert slugify("numpy_pandas_script") == "numpy-pandas-script" and slugify("My Lab!") == "my-lab"
     assert slugify("эксперимент") == slugify("эксперимент")  # имя архива не меняется от сборки к сборке
+
+
+
+def test_comment_ending_with_backslash_does_not_swallow_next_requirement():
+    """pip склеивает строку, оканчивающуюся на «\\», со следующей: комментарий «C:\\data\\» съел бы pandas."""
+    text = requirements_text((Requirement("numpy", "1.26", comment="данные в C:\\data\\ \\"),
+                              Requirement("pandas", ">=2.0")), "now")
+    assert not any(line.rstrip().endswith("\\") for line in text.splitlines()), text
+    assert "C:\\data" in text and "\npandas>=2.0" in text

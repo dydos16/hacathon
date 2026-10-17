@@ -133,8 +133,9 @@ def requirements_text(reqs: tuple[Requirement, ...], created: str) -> str:
         notes = [] if spec else ["версия неизвестна"]
         if not req.confirmed:
             notes.append("НЕ ПОДТВЕРЖДЕНО — проверьте имя пакета")
-        if req.comment:
-            notes.append(" ".join(req.comment.split()))
+        # «\» в конце строки pip считает переносом: следующая строка с пакетом приклеилась бы к комментарию
+        if comment := " ".join(req.comment.split()).rstrip("\\ "):
+            notes.append(comment)
         line = f"{req.package}{spec}"
         row = f"{line:<32} # {'; '.join(notes)}" if notes else line
         lines.append(row if req.confirmed else f"# {row}")  # имя без проверки не ставим: строка закомментирована
