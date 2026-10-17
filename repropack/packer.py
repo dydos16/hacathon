@@ -17,7 +17,7 @@ from . import __version__
 from .analysis import Analysis
 from .classify import LOCAL_ENV, PACKAGED_CATEGORIES, VERSION_SPEC, Dependency, normalize
 from .markdown import code, escape
-from .secrets import env_names, find_secrets, read_text, redact, redact_bytes
+from .secrets import env_names, find_secrets, read_text, redact, redact_bytes, scan
 
 TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" / "templates"),
                         keep_trailing_newline=True, undefined=StrictUndefined, autoescape=False)
@@ -262,7 +262,7 @@ def env_templates(analysis: Analysis) -> dict[str, str]:
     names: dict[str, list[str]] = {}
     for path in analysis.secret_files:
         target = posixpath.join(posixpath.dirname(path), ".env.example")
-        names.setdefault(target, []).extend(env_names(path, read_text(analysis.files[path])))
+        names.setdefault(target, []).extend(env_names(path, read_text(analysis.files[path], path)))
     return {target: ENV_TEMPLATE_HEADER + "".join(f"{name}=\n" for name in dict.fromkeys(found))
             for target, found in names.items() if found and target not in analysis.files}
 
@@ -271,8 +271,8 @@ def _project_files(analysis: Analysis) -> dict[str, bytes]:
     """Исходники для пакета: без файлов-секретов; каждый текстовый файл вымаран, а не только те, где анализ нашёл."""
     sources = {path: redact_bytes(path, data)
                for path, data in analysis.files.items() if path not in analysis.secret_files}
-    # Страховка: значение, оставшееся после вымарывания в любом текстовом файле, не уходит в пакет
-    if leaked := [path for path, data in sources.items() if find_secrets(path, read_text(data))]:
+    # Страховка: значение, оставшееся после вымарывания в любом файле (в двоичном его не вымарать), не уходит в пакет
+    if leaked := [path for path, data in sources.items() if scan(path, data)]:
         raise ValueError(f"секрет в {', '.join(sorted(redact(p, plain=True) for p in leaked))} не удалось заменить "
                          "на <REDACTED> — уберите его из файла вручную")
     return {**sources, **{path: text.encode() for path, text in env_templates(analysis).items()}}

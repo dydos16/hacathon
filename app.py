@@ -58,6 +58,13 @@ PREVIEW = {"README.md": "markdown", "requirements.txt": "text", "REPORT.md": "ma
            "verify.sh": "bash", "verify.ps1": "powershell", "repro.json": "json"}
 PREVIEW_HEIGHT = 480  # px: длинный отчёт прокручивается внутри вкладки, а не растягивает страницу
 ANALYSIS_STATE = "analysis"  # ключ st.session_state: разбор текущей загрузки
+# Распакованная загрузка и собранный пакет тоже хранятся в сессии: иначе каждый клик (галочка, версия Python,
+# правка таблицы) заново распаковывал бы архив, считал отпечаток всех байт и собирал ZIP — секунды на клик
+UPLOAD_STATE, BUILD_STATE = "upload", "build"
+SESSION_STATES = (ANALYSIS_STATE, UPLOAD_STATE, BUILD_STATE)
+# Больше строк браузер не отрисует: 2000 файлов по сотне импортов дают 200 тысяч строк. Полный список — в REPORT.md
+ROWS_SHOWN, ISSUES_SHOWN = 300, 200
+LOCAL_ADDRESSES = {"127.0.0.1", "localhost", "::1"}
 
 st.set_page_config(page_title="repro-packer", layout="wide")
 
@@ -82,24 +89,42 @@ def session_analysis(files: dict[str, bytes], use_local_env: bool, key: str) -> 
     return cached[1]
 
 
-def choose_source() -> tuple[dict[str, bytes], str] | None:
-    """Файлы или ZIP, папка целиком (подпапки сохраняются) или демо-проект → (файлы, имя проекта)."""
+def forget_upload() -> None:
+    """Убранная, отклонённая или сменившаяся загрузка не остаётся в памяти сессии."""
+    for state in SESSION_STATES:
+        st.session_state.pop(state, None)
+
+
+def session_upload(uploads: list, folder: bool) -> tuple[dict[str, bytes], str]:
+    """Файлы загрузки и их отпечаток — один раз на загрузку: file_id не меняется, пока файлы те же."""
+    ids = (folder, *(u.file_id for u in uploads))
+    cached = st.session_state.get(UPLOAD_STATE)
+    if cached is None or cached[0] != ids:
+        forget_upload()
+        # Лимиты — по UploadedFile.size, до чтения: слишком большая загрузка не копируется в память целиком
+        check_upload([(u.name, u.size) for u in uploads], keep_paths=folder)
+        files = read_upload([(u.name, u.getvalue()) for u in uploads], keep_paths=folder)
+        cached = st.session_state[UPLOAD_STATE] = ids, files, signature(files)
+    return cached[1], cached[2]
+
+
+def choose_source() -> tuple[dict[str, bytes], str, str] | None:
+    """Файлы или ZIP, папка целиком (подпапки сохраняются) или демо-проект → (файлы, имя проекта, отпечаток)."""
     mode = st.radio("Источник", SOURCES, horizontal=True, label_visibility="collapsed")
     if mode == "Демо-проект":
         name = st.selectbox("Демо-проект", EXAMPLES, format_func=lambda k: f"{k} — {EXAMPLES[k]}")
-        return read_directory(EXAMPLES_DIR / name), name
+        files = read_directory(EXAMPLES_DIR / name)
+        return files, name, signature(files)
     folder = mode == "Папка проекта"
     uploads = st.file_uploader("Папка проекта: подпапки сохранятся, .git и .venv пропускаются" if folder
                                else "Файлы проекта: .py, .ipynb, ZIP-архив, данные и requirements",
                                accept_multiple_files="directory" if folder else True)
     if not uploads:
         return None
-    # Лимиты — по UploadedFile.size, до чтения: слишком большая загрузка не копируется в память целиком
-    check_upload([(u.name, u.size) for u in uploads], keep_paths=folder)
-    files = read_upload([(u.name, u.getvalue()) for u in uploads], keep_paths=folder)
+    files, key = session_upload(uploads, folder)
     if folder:  # имя загруженного файла — путь внутри папки, начиная с имени самой папки
-        return files, PurePosixPath(uploads[0].name).parts[0]
-    return files, Path(uploads[0].name).stem if len(uploads) == 1 else "project"
+        return files, PurePosixPath(uploads[0].name).parts[0], key
+    return files, Path(uploads[0].name).stem if len(uploads) == 1 else "project", key
 
 
 def apply_style() -> None:
@@ -220,7 +245,8 @@ def show_issues(analysis: Analysis) -> None:
             continue
         height = ISSUE_LIST_HEIGHT if len(issues) > ISSUES_BEFORE_SCROLL else "content"
         with st.expander(f":{color}[{label}: {len(issues)}]", expanded=level != "info"), st.container(height=height):
-            st.markdown("\n".join(map(issue_markdown, issues)))
+            more = f"\n\n… и ещё {len(issues) - ISSUES_SHOWN} — полный список в REPORT.md" if len(issues) > ISSUES_SHOWN else ""
+            st.markdown("\n".join(map(issue_markdown, issues[:ISSUES_SHOWN])) + more)
 
 
 def _cell(row: pd.Series, column: str) -> str:
@@ -247,8 +273,10 @@ def show_all_modules(analysis: Analysis) -> None:
     stdlib, local = (sum(d.category == c for d in deps) for c in ("stdlib", "local"))
     with st.expander(f"Все модули проекта: {len(deps)} · стандартная библиотека: {stdlib} · локальные: {local}"):
         st.dataframe(pd.DataFrame([{"Модуль": d.module, "Категория": CATEGORIES[d.category],
-                                    "Пакет PyPI": d.package, "Где": ", ".join(d.locations[:3])} for d in deps]),
-                     width="stretch", hide_index=True)
+                                    "Пакет PyPI": d.package, "Где": ", ".join(d.locations[:3])}
+                                   for d in deps[:ROWS_SHOWN]]), width="stretch", hide_index=True)
+        if len(deps) > ROWS_SHOWN:
+            st.caption(f"Показаны первые {ROWS_SHOWN} из {len(deps)} — полный список в REPORT.md.")
 
 
 def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
@@ -257,6 +285,11 @@ def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
                "Строки, где нужно решение, — сверху; строку можно добавить вручную.")
     pairs = sorted(zip(packaged_dependencies(analysis), default_requirements(analysis)),
                    key=lambda pair: not pair[0].needs_confirmation)
+    # Строки сверх показанных уходят в requirements.txt без правок — как и строки таблицы, которые не трогали
+    pairs, hidden = pairs[:ROWS_SHOWN], tuple(r for _, r in pairs[ROWS_SHOWN:])
+    if hidden:
+        st.caption(f"Показаны первые {ROWS_SHOWN} пакетов, где нужно решение, — сверху; ещё {len(hidden)} попадут "
+                   "в requirements.txt без изменений (полный список — в REPORT.md).")
     rows = pd.DataFrame([{
         "Включить": True, "Модуль": d.module, "Пакет PyPI": r.package, "Версия": r.version,
         "Подтверждено": r.confirmed, "Примечание": dependency_note(d), "Комментарий": r.comment,
@@ -272,7 +305,7 @@ def dependency_editor(analysis: Analysis, key: str) -> tuple[Requirement, ...]:
                     _flag(row, "Подтверждено"))
         for _, row in edited.iterrows()
         if _flag(row, "Включить") and _cell(row, "Пакет PyPI")
-    )
+    ) + hidden
 
 
 def entry_reason(scan: FileScan) -> str:
@@ -327,11 +360,25 @@ def show_preview(package: bytes) -> None:
     tabs[-1].code("\n".join(names), language="text")
 
 
-def build(analysis: Analysis, options: PackOptions) -> tuple[bytes | None, str]:
-    try:
-        return build_zip(analysis, options), ""
-    except ValueError as exc:
-        return None, str(exc)
+def build(analysis: Analysis, options: PackOptions, key: tuple) -> tuple[bytes | None, str]:
+    """Пакет собирается заново, только если изменились загрузка или настройки, а не на каждой перерисовке."""
+    cached = st.session_state.get(BUILD_STATE)
+    if cached is None or cached[0] != (key, options):
+        try:
+            result = build_zip(analysis, options), ""
+        except ValueError as exc:
+            result = None, str(exc)
+        cached = st.session_state[BUILD_STATE] = (key, options), result
+    return cached[1]
+
+
+def local_env_allowed() -> bool:
+    """Версии «из среды» — это пакеты и ОС машины, где запущен сервер. Показываем, только когда сервер слушает
+    лишь эту машину (server.address = 127.0.0.1 в .streamlit/config.toml) или это явно разрешено REPRO_LOCAL=1;
+    REPRO_PUBLIC=1 запрещает в любом случае."""
+    if os.environ.get("REPRO_PUBLIC"):
+        return False
+    return bool(os.environ.get("REPRO_LOCAL")) or st.get_option("server.address") in LOCAL_ADDRESSES
 
 
 def main() -> None:
@@ -341,20 +388,18 @@ def main() -> None:
     try:
         source = choose_source()
     except IntakeError as exc:
-        st.session_state.pop(ANALYSIS_STATE, None)
+        forget_upload()
         st.error(f"Не удалось принять загрузку: {escape(str(exc))}")
         return
-    # На общем сервере (REPRO_PUBLIC=1) версии «из среды» — это пакеты и ОС сервера, их не показываем посетителям
-    use_local_env = not os.environ.get("REPRO_PUBLIC") and st.checkbox(
+    use_local_env = local_env_allowed() and st.checkbox(
         "Читать версии пакетов из среды, где запущен repro-packer",
         help="Только при локальном запуске: версии берутся из importlib.metadata этой машины. "
              "Без согласия версии не читаются.")
     if source is None:
-        st.session_state.pop(ANALYSIS_STATE, None)
+        forget_upload()
         show_start_screen()
         return
-    files, name = source
-    key = signature(files)
+    files, name, key = source
     analysis = session_analysis(files, use_local_env, key)
     if not analysis.entry_candidates:
         st.error("Нечего запускать: в загрузке только служебные файлы Python (`__init__.py`, `__main__.py`…). "
@@ -365,7 +410,7 @@ def main() -> None:
     requirements = dependency_editor(analysis, key=f"deps-{key}-{use_local_env}")
     entry, python, args, project_name = run_options(analysis, name, key)
     options = PackOptions(project_name, entry, python, requirements, args)
-    package, error = build(analysis, options)
+    package, error = build(analysis, options, (key, use_local_env))
     with summary:
         show_summary(analysis, options, package, error)
     if package is not None:

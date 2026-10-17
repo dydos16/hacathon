@@ -13,6 +13,10 @@ from pathlib import Path, PurePosixPath
 MAX_ARCHIVE_BYTES = 150 * 1024 * 1024  # = maxUploadSize в .streamlit/config.toml: проект вместе с примером данных
 MAX_UNPACKED_BYTES = 600 * 1024 * 1024  # в 4 раза больше архива (CSV сжимается в разы), но не zip-бомба
 MAX_FILES = 2000
+# Код и CSV сжимаются в 5–20 раз; 1,6 МБ архива → 550 МБ текста (344:1) — бомба, которая держит сервер полминуты.
+# Небольшая загрузка проверяется только общим лимитом: проект на пару мегабайт из повторов — не атака
+MAX_COMPRESSION_RATIO = 100
+RATIO_FREE_BYTES = 20 * 1024 * 1024
 # Записи центрального каталога, включая служебные: каждая становится объектом в памяти ещё до фильтрации.
 # ponytail: потолок ~ десятки МБ памяти на запрос; при большем — потоковый разбор каталога
 MAX_ZIP_RECORDS = 50_000
@@ -120,9 +124,13 @@ def read_zip(data: bytes) -> dict[str, bytes]:
         raise IntakeError(f"В архиве больше {MAX_FILES} файлов")
     if sum(info.file_size for _, info in entries) > MAX_UNPACKED_BYTES:
         raise IntakeError("Распакованный архив слишком большой (возможна zip-бомба)")
+    # Бюджет — по реально прочитанным байтам: заголовок архива может соврать о размере
+    budget = min(MAX_UNPACKED_BYTES, max(RATIO_FREE_BYTES, MAX_COMPRESSION_RATIO * len(data)))
+    if sum(info.file_size for _, info in entries) > budget:
+        raise IntakeError(f"Архив сжат больше чем в {MAX_COMPRESSION_RATIO} раз (возможна zip-бомба): "
+                          "приложите пример данных поменьше")
     _check_unique([path for path, _ in entries])
     files: dict[str, bytes] = {}
-    budget = MAX_UNPACKED_BYTES
     for path, info in entries:
         files[path] = _read_entry(archive, info, budget)
         budget -= len(files[path])

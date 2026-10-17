@@ -1,4 +1,7 @@
 [server]
+# Только эта машина: без адреса Streamlit слушает все интерфейсы и отвечает соседям по сети.
+# Показать с телефона или другого компьютера: streamlit run app.py --server.address 0.0.0.0
+address = "127.0.0.1"
 # Совпадает с лимитом repropack.intake.MAX_ARCHIVE_BYTES
 maxUploadSize = 150
 

@@ -12,7 +12,7 @@ from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB
 from .markdown import escape
 from .scanner import (DATA_EXTENSIONS, MAX_DATA_REF_CHARS, MAX_TOTAL_CODE_CHARS, NO_REQUIREMENT, OVER_BUDGET, FileScan,
                       scan_notebook, scan_source, skipped_scan)
-from .secrets import SecretHit, env_names, find_secrets, is_secret_file, read_text, redact
+from .secrets import IN_BINARY, SecretHit, env_names, is_secret_file, read_text, redact, scan
 
 DEFAULT_PYTHON = (3, 11)
 ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "train.py")
@@ -351,11 +351,15 @@ def _hygiene(files: dict[str, bytes], data_found: list[str], has_declared: bool)
 
 
 def _excluded_detail(path: str, data: bytes) -> str:
-    names = env_names(path, read_text(data))
+    names = env_names(path, read_text(data, path))
     if names:
         return (f"коллеге нужны свои значения переменных {', '.join(names)}: они перечислены без значений "
                 "в .env.example пакета — впишите значения и переименуйте файл в .env")
     return "если код читает этот файл, коллеге понадобится свой — передайте его отдельно, не в архиве"
+
+
+BINARY_SECRET_DETAIL = ("в двоичном файле значение не заменить на <REDACTED> — пакет не соберётся, пока файл в "
+                        "загрузке: уберите файл или пересоздайте его без ключа")
 
 
 def _secret_issues(files: dict[str, bytes], secret_files: tuple[str, ...],
@@ -364,6 +368,7 @@ def _secret_issues(files: dict[str, bytes], secret_files: tuple[str, ...],
     issues = [Issue("medium", "Файл с секретами исключён из пакета", _excluded_detail(p, files[p]), p)
               for p in secret_files]
     issues += [Issue("high", f"Похоже на секрет: {h.kind} ({h.masked})",
+                     BINARY_SECRET_DETAIL if h.kind.endswith(IN_BINARY) else
                      "в пакете значение заменено на <REDACTED> — передавайте его через переменную окружения",
                      f"{h.path}:{h.line}") for h in secrets]
     return issues
@@ -397,7 +402,7 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
     secret_files = tuple(p for p in files if is_secret_file(p))
     # Каждый файл, где по содержимому текст (расширение не важно); двоичные пропускаются без декодирования
     secrets = tuple(hit for p, data in files.items() if p not in secret_files
-                    for hit in find_secrets(p, read_text(data)))
+                    for hit in scan(p, data))
     data_found, data_missing = _data_refs(scans, files)
     data_missing = [(clean(ref), where) for ref, where in data_missing]
     hygiene = _hygiene(files, data_found, bool(declared))
