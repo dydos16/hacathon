@@ -101,7 +101,7 @@ def test_declared_file_that_cannot_be_read_becomes_an_issue_not_a_crash(monkeypa
 
     monkeypatch.setitem(classify.READERS, "pyproject.toml", (broken, False))
     analysis = analyze({"main.py": b"import os\n", "pyproject.toml": b"[project]\n"})
-    assert any(i.title == "Файл «pyproject.toml» не разобран" and i.level == "medium" for i in analysis.issues)
+    assert any(i.title == "Файл «pyproject\\.toml» не разобран" and i.level == "medium" for i in analysis.issues)
 
 
 def test_oversized_setup_py_is_refused_before_ast_parse():
@@ -152,3 +152,12 @@ def test_expression_text_falls_back_when_unparse_overflows(monkeypatch):
 
     monkeypatch.setattr(scanner.ast, "unparse", overflow)
     assert scanner._source(ast.parse("a", mode="eval").body) == "(слишком глубокое выражение)"
+
+
+def test_unreadable_declared_file_path_cannot_become_a_link_in_the_report():
+    """Путь файла зависимостей — текст пользователя: в заголовке проблемы он не должен стать ссылкой."""
+    from repropack.markdown import escape
+
+    path = "a[b](http:evil)/requirements.txt"
+    analysis = analyze({"main.py": b"import os\n", path: b"numpy\n" + b"#" * (2 * 1024 * 1024) + b"\n"})
+    assert f"Файл «{escape(path)}» не разобран" in [i.title for i in analysis.issues]

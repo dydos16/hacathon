@@ -384,7 +384,7 @@ def _merge_repeats(issues: list[Issue]) -> list[Issue]:
 
 
 def _unreadable_declared(paths: tuple[str, ...]) -> list[Issue]:
-    return [Issue("medium", f"Файл «{path}» не разобран",
+    return [Issue("medium", f"Файл «{escape(path)}» не разобран",
                   "в нём некорректная или слишком большая запись зависимостей; проверьте её вручную в таблице", path)
             for path in paths]
 
