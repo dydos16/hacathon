@@ -1,7 +1,13 @@
 #!/bin/sh
 # Проверка пакета в чистом виртуальном окружении (создано repro-packer).
-# Запуск: sh verify.sh     Другой интерпретатор: PYTHON=python{{ python_version }} sh verify.sh
+# Запуск: sh verify.sh     Другой интерпретатор: PYTHON=/путь/к/python sh verify.sh
 cd "$(dirname "$0")" || exit 1
+# Без PYTHON берём нужную версию, а если её нет — ближайшую новее: на macOS python3 — системный 3.9
+if [ -z "$PYTHON" ]; then
+  for version in {{ python_candidates|join(" ") }}; do
+    if command -v "python$version" > /dev/null 2>&1; then PYTHON="python$version"; break; fi
+  done
+fi
 PYTHON="${PYTHON:-python3}"
 LOG=verify_log.txt
 VPY=.repro-venv/bin/python

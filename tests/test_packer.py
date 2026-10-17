@@ -184,6 +184,39 @@ def test_verify_sh_warns_about_other_python_version_and_keeps_exit_code(tmp_path
     assert ("ВНИМАНИЕ: нужен Python 3.11, а запускается 3.9" in log) is warned
 
 
+def fake_python(folder: Path, name: str, version: str) -> None:
+    folder.mkdir(exist_ok=True)
+    script = folder / name
+    script.write_text(FAKE_PYTHON.replace("$FAKE", version))
+    script.chmod(0o755)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="нужен POSIX sh")
+@pytest.mark.parametrize("installed, chosen", [
+    (("python3.11", "python3.12", "python3"), "3.11"),  # нужная версия есть — берётся она
+    (("python3.13", "python3.12", "python3"), "3.12"),  # нет — ближайшая новее
+    (("python3",), "3.9"),  # ничего подходящего — python3 и предупреждение
+])
+def test_verify_sh_finds_the_required_python_without_the_python_variable(tmp_path: Path, installed, chosen):
+    """Коллеге не нужно писать PYTHON=python3.11: на macOS python3 — это системный 3.9, а 3.11 стоит рядом."""
+    archive, root = pack("local_module_project", python_version="3.11")
+    archive.extractall(tmp_path)
+    for name in installed:
+        fake_python(tmp_path / "bin", name, name.removeprefix("python") if name != "python3" else "3.9")
+    subprocess.run(["sh", "verify.sh"], cwd=tmp_path / root, capture_output=True,
+                   env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin"})
+    log = (tmp_path / root / "verify_log.txt").read_text()
+    assert f"найден: Python {chosen}.0" in log
+    assert ("ВНИМАНИЕ" in log) is (chosen != "3.11")
+
+
+def test_verify_ps1_finds_the_required_python_with_the_py_launcher():
+    """На Windows несколько версий Python различает лаунчер py: py -3.11, затем новее, иначе python."""
+    archive, root = pack("local_module_project", python_version="3.11")
+    ps1 = archive.read(f"{root}/verify.ps1").decode("utf-8-sig")
+    assert "'3.11', '3.12', '3.13', '3.14'" in ps1 and 'py "-$Version"' in ps1
+
+
 def test_verify_ps1_matches_verify_sh_checks():
     archive, root = pack("local_module_project", python_version="3.11")
     ps1 = archive.read(f"{root}/verify.ps1").decode("utf-8-sig")

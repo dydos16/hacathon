@@ -60,6 +60,7 @@ TREE_NOTE_COLUMN = 40  # символов: пояснения в дереве в
 TREE_LIMIT = 40  # строк: у большого проекта дерево обрезается, полный состав — в самом архиве
 SLUG_LIMIT = 40  # символов: тег Docker-образа — до 128, имя папки — до 255 байт
 SLUG_HASH = 8  # шестнадцатеричных знаков sha256 исходного имени
+NEWEST_PYTHON_MINOR = 14  # verify-скрипты ищут нужный Python, а если его нет — ближайший новее, до 3.14
 ENV_TEMPLATE_HEADER = ("# Создано repro-packer вместо исключённого файла с секретами: значения автора удалены.\n"
                        "# Впишите свои значения и переименуйте файл в .env\n")
 
@@ -203,6 +204,12 @@ def _package_tree(analysis: Analysis, options: PackOptions) -> str:
                         [*PACKAGE_FILES, *(f"project/{p}" for p in sources)], notes)
 
 
+def python_candidates(version: str) -> list[str]:
+    """Версии, которые verify-скрипт пробует по порядку: нужная, затем новее (минимальная подходящая — первой)."""
+    major, minor = map(int, version.split("."))
+    return [version, *(f"{major}.{m}" for m in range(minor + 1, NEWEST_PYTHON_MINOR + 1) if major == 3)]
+
+
 def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, ...], created: str) -> dict:
     parts = run_parts(options.entry_point, options.run_args)
     system = [(r.package, SYSTEM_PACKAGES[normalize(r.package)]) for r in reqs
@@ -214,6 +221,7 @@ def _context(analysis: Analysis, options: PackOptions, reqs: tuple[Requirement, 
         "project_name": options.project_name, "slug": slugify(options.project_name), "created": created,
         "tree": _package_tree(analysis, options),
         "python_version": options.python_version, "python_reason": analysis.python_reason,
+        "python_candidates": python_candidates(options.python_version),
         "requirements": reqs, "unknown_versions": [r.package for r in reqs if not _spec(r.version)],
         "system_packages": system, "system_apt": " ".join(dict.fromkeys(" ".join(a for _, a in system).split())),
         "run_tail": run_tail, "run_command": redact(f"python {run_tail}"), "cmd_json": json.dumps(["python", *parts]),

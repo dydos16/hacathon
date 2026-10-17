@@ -16,6 +16,7 @@ powershell -ExecutionPolicy RemoteSigned -File verify.ps1  # локальные 
 
 Скрипт создаёт чистое окружение `.repro-venv`, ставит зависимости, сохраняет точные версии
 в `requirements.lock.txt`, запускает проект и пишет итог в `verify_log.txt`.
+Python {{ python_version }} скрипт находит сам (если его нет — ближайшую более новую версию); свой интерпретатор: `PYTHON=/путь/к/python sh verify.sh`.
 
 ## Структура пакета
 

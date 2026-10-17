@@ -6,7 +6,15 @@ Set-Location $PSScriptRoot
 $env:PYTHONUTF8 = "1"
 $Utf8 = New-Object System.Text.UTF8Encoding $false
 try { [Console]::OutputEncoding = $Utf8 } catch { }
-$Py = if ($env:PYTHON) { $env:PYTHON } else { "python" }
+# Без PYTHON берём нужную версию через лаунчер py, а если её нет — ближайшую новее; иначе python из PATH
+$Py = $env:PYTHON
+if (-not $Py -and (Get-Command py -ErrorAction SilentlyContinue)) {
+  foreach ($Version in @({% for v in python_candidates %}'{{ v }}'{{ ", " if not loop.last }}{% endfor %})) {
+    $Exe = & py "-$Version" -c "import sys; print(sys.executable)" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $Exe) { $Py = "$Exe".Trim(); break }
+  }
+}
+if (-not $Py) { $Py = "python" }
 $Log = Join-Path $PSScriptRoot "verify_log.txt"
 $VPy = Join-Path $PSScriptRoot ".repro-venv\Scripts\python.exe"
 function Append($Text) { [System.IO.File]::AppendAllText($Log, "$Text`r`n", $Utf8) }
