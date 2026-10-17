@@ -9,7 +9,7 @@ import pytest
 
 from repropack import intake
 from repropack.intake import IntakeError, read_directory, read_upload
-from repropack.secrets import find_secrets, is_secret_file, redact, redact_bytes
+from repropack.secrets import find_secrets, is_secret_file, read_text, redact, redact_bytes
 
 FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
 
@@ -169,7 +169,9 @@ def test_env_templates_are_kept_but_still_scanned():
 def test_config_files_are_scanned_regardless_of_suffix_case():
     assert find_secrets("settings.CFG", 'password = "hunter2hunter2"\n')
     assert find_secrets("app.conf", 'db_password = "hunter2hunter2"\n')
-    assert find_secrets("photo.png", 'password = "hunter2hunter2"\n') == []
+    # текст или нет — решает содержимое: двоичный PNG не сканируется, как бы он ни назывался
+    png = b"\x89PNG\r\n\x1a\n\x00\x00" + b'password = "hunter2hunter2"\n'
+    assert find_secrets("photo.png", read_text(png)) == []
 
 
 def test_redaction_keeps_the_original_file_encoding():

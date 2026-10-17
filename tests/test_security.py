@@ -149,9 +149,11 @@ def test_entry_point_named_like_an_option_is_run_as_a_path():
 
 
 def test_secret_in_run_args_is_not_echoed_into_readme_or_manifest():
-    archive, root = pack("local_module_project", run_args=f"--key {FAKE_KEY}")
-    assert FAKE_KEY not in archive.read(f"{root}/README.md").decode()
-    assert FAKE_KEY not in archive.read(f"{root}/repro.json").decode()
+    # build_zip с ключом в аргументах пакет не собирает (test_secrets); здесь — текст README и repro.json
+    analysis = analyze({"main.py": b"print(1)\n"})
+    generated = render_package(analysis, PackOptions("p", "main.py", "3.11", (), f"--key {FAKE_KEY}"))
+    assert FAKE_KEY not in generated["README.md"]
+    assert FAKE_KEY not in generated["repro.json"]
 
 
 def test_windows_instructions_do_not_disable_the_execution_policy():
