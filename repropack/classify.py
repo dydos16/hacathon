@@ -1,9 +1,11 @@
 """Классификация импортов: стандартная библиотека / локальный модуль / внешний пакет PyPI."""
 
 import ast
+import bisect
 import codecs
 import configparser
 import json
+import posixpath
 import re
 import sys
 import tomllib
@@ -12,7 +14,7 @@ from functools import cache
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 
-from .scanner import COMPLEXITY_ERRORS, MAX_CODE_CHARS, SYNTAX_ERRORS, FileScan
+from .scanner import COMPLEXITY_ERRORS, MAX_CODE_CHARS, MAX_TOTAL_CODE_CHARS, SYNTAX_ERRORS, FileScan, parse_code
 
 STDLIB = frozenset(sys.stdlib_module_names)
 PYTHON2 = (2, 7)
@@ -55,6 +57,9 @@ CONDA_ONLY_NOTE = "пакет conda без import в коде — в requirement
 LOCAL_ENV = "локальная среда"  # имя или версия прочитаны из среды, где запущен repro-packer
 NOT_ON_PYPI = "не с PyPI"  # статус модуля, который из PyPI не поставить
 MAPPING_FILE = Path(__file__).parent / "data" / "module_to_package.json"
+# Самое длинное имя в справочнике — «google.cloud.storage», три части. Префиксы длиннее не проверяются: все префиксы
+# имени «a.a.a…» из importlib.import_module или exec — квадрат от числа частей, десятки секунд на одну строку
+MAX_PACKAGE_PARTS = 8
 
 
 @dataclass(frozen=True)
@@ -216,7 +221,7 @@ def _from_setup_py(text: str, source: str) -> tuple[list[Declared], str]:
     if len(text) > MAX_CODE_CHARS:  # такой setup.py не разбираем: память ast растёт примерно на 120 МБ на мегабайт
         raise ValueError(f"setup.py слишком большой для разбора: больше {MAX_CODE_CHARS // 1_000_000} МБ")
     try:
-        arguments = _setup_arguments(ast.parse(text))
+        arguments = _setup_arguments(parse_code("setup.py", text)[0])
     except (*SYNTAX_ERRORS, *COMPLEXITY_ERRORS):
         return [], ""
     missing = ast.Constant(None)
@@ -280,11 +285,19 @@ def _declared_items(files: dict[str, bytes]) -> tuple[list[Declared], str, list[
     items: list[Declared] = []
     python = ""
     unreadable: list[str] = []
+    budget = MAX_TOTAL_CODE_CHARS  # тот же лимит, что у кода: разбор файла зависимостей стоит ~30 байт памяти на байт
     for path, data in sorted(files.items()):  # порядок файлов в ZIP не должен влиять на результат
         name = PurePosixPath(path).name
-        if name.startswith("requirements") and name.endswith(".txt"):
+        requirements = name.startswith("requirements") and name.endswith(".txt")
+        if not requirements and name not in READERS:
+            continue
+        if len(data) > min(MAX_CODE_CHARS, budget):  # настоящие файлы зависимостей — килобайты
+            unreadable.append(path)
+            continue
+        budget -= len(data)
+        if requirements:
             items += _from_lines(_text(data).splitlines(), path)
-        elif name in READERS:
+        else:
             read, exact = READERS[name]
             try:
                 found, hint = read(_text(data), path)
@@ -328,14 +341,18 @@ def parse_declared(files: dict[str, bytes]) -> tuple[dict[str, Declared], str]:
     return declared, python
 
 
-def _module_exists(prefix: str, top: str, files: dict[str, bytes]) -> bool:
-    return f"{prefix}{top}.py" in files or any(p.startswith(f"{prefix}{top}/") for p in files)
+def module_exists(module_path: str, files: dict[str, bytes], paths: list[str]) -> bool:
+    """В проекте есть файл module_path.py или папка module_path/. paths — sorted(files), один раз на анализ:
+    двоичный поиск вместо перебора всех путей на каждый импорт (2000 файлов × 40 импортов — почти минута)."""
+    folder = f"{module_path}/"
+    first = bisect.bisect_left(paths, folder)  # пути внутри папки идут в сортировке подряд, начиная отсюда
+    return f"{module_path}.py" in files or (first < len(paths) and paths[first].startswith(folder))
 
 
-def is_local(top: str, importer: str, files: dict[str, bytes]) -> bool:
+def is_local(top: str, importer: str, files: dict[str, bytes], paths: list[str]) -> bool:
     """Модуль локальный, если рядом с импортирующим файлом, в корне или в src/ есть top.py или папка top/."""
-    folders = {str(PurePosixPath(importer).parent), ".", "src"}
-    return any(_module_exists("" if f == "." else f"{f}/", top, files) for f in folders)
+    folders = {posixpath.dirname(importer), "", "src"}  # dirname, а не PurePosixPath: вызов на каждый импорт
+    return any(module_exists(f"{f}/{top}" if f else top, files, paths) for f in folders)
 
 
 @cache
@@ -403,7 +420,7 @@ def _removed(top: str, common: dict) -> Dependency:
 def _module_key(module: str, declared: dict[str, Declared]) -> str:
     """Имя для поиска пакета: самое длинное известное («google.cloud.storage», «ruamel.yaml» из requirements),
     иначе модуль верхнего уровня («numpy.linalg» → «numpy»)."""
-    mapping, parts = load_mapping(), module.split(".")
+    mapping, parts = load_mapping(), module.split(".", MAX_PACKAGE_PARTS)[:MAX_PACKAGE_PARTS]
     listed = (".".join(parts[:n]) for n in range(len(parts), 1, -1))
     return next((name for name in listed if normalize(name) in declared
                  or any(name in mapping[s] for s in ("known", "ambiguous", "not_on_pypi"))), parts[0])
@@ -420,19 +437,19 @@ def _collect_usages(scans: list[FileScan], declared: dict[str, Declared]) -> dic
     return usages
 
 
-def _classify_module(module: str, uses: list[tuple[str, str, str]], files: dict[str, bytes],
+def _classify_module(module: str, uses: list[tuple[str, str, str]], files: dict[str, bytes], paths: list[str],
                      declared: dict[str, Declared], use_local_env: bool) -> Dependency:
     top = module.split(".", 1)[0]
     common = {"module": module, "kinds": tuple(sorted({kind for _, _, kind in uses})),
               "locations": tuple(where for _, where, _ in uses)}
     if top in REMOVED_STDLIB:
         return _removed(top, common)
-    if top in STDLIB and _module_exists("", top, files):
+    if top in STDLIB and module_exists(top, files, paths):
         return Dependency(category="local", **common,
                           note="имя совпадает с модулем стандартной библиотеки — Python возьмёт файл проекта")
     if top in STDLIB:
         return Dependency(category="stdlib", **common)
-    if any(is_local(top, path, files) for path, _, _ in uses):
+    if any(is_local(top, path, files, paths) for path, _, _ in uses):
         return Dependency(category="local", **common)
     resolved = _resolve_package(module, declared, use_local_env)
     version, source, conflict = _version(resolved.get("package", ""), declared, use_local_env, module)
@@ -480,7 +497,8 @@ def classify(scans: list[FileScan], files: dict[str, bytes], use_local_env: bool
              for scan in scans for req in map(_requirement, scan.pip_hints) if req]
     declared = _merge_declared(items + hints)  # при равной точности версия из файлов автора важнее !pip install
     usages = _collect_usages(scans, declared)
-    deps = [_classify_module(module, usages[module], files, declared, use_local_env)
+    paths = sorted(files)
+    deps = [_classify_module(module, usages[module], files, paths, declared, use_local_env)
             for module in sorted(usages, key=str.lower)]
     deps += _implicit(scans, usages, deps, declared, use_local_env)
     return deps + _declared_only(declared, _packages(deps))

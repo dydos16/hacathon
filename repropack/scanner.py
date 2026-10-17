@@ -41,7 +41,15 @@ COMPLEXITY_ERRORS = (RecursionError, MemoryError)
 # на Windows и в Python 3.11 он ниже), пропускаем только такие строки, а не весь файл с его импортами.
 LONG_STATEMENT_TOKENS = 500
 MAX_LINE_CHARS = 2_000  # физическая строка длиннее — почти всегда сгенерированный код; ast на ней тратит память квадратично
+# Физические строки, склеенные обратной косой чертой в конце, — одна строка для парсера: «import a» + «.a» × 40 000
+# на коротких строках занимает 1,3 ГБ памяти ast
+CONTINUATION = re.compile(r"\\(?:\r\n|\r|\n)")
 MAX_CODE_CHARS = 1_000_000  # один файл; настоящие скрипты на порядки меньше, а мегабайт кода — сотни МБ памяти ast
+MAX_TOTAL_CODE_CHARS = 10_000_000  # весь проект: крошечный ZIP с мегабайтами кода не должен занимать сервер минутами
+OVER_BUDGET = f"исчерпан лимит {MAX_TOTAL_CODE_CHARS // 1_000_000} МБ кода на проект"
+# Ноутбук целиком, с выводами ячеек: json.loads на «[{}, {}, …]» занимает в 20+ раз больше памяти, чем сам файл
+MAX_NOTEBOOK_CHARS = 10_000_000
+MAX_DATA_REF_CHARS = 260  # строка длиннее — не путь к файлу данных
 LAYOUT_TOKENS = {tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}
 # !pip, %pip, !pip3, !python -m pip, !{sys.executable} -m pip, !uv pip
 PIP_MAGIC = re.compile(r"^\s*[!%]\s*(?:\S+\s+-m\s+|uv\s+)?pip3?\s+install\s+(.+)$")
@@ -91,6 +99,7 @@ class FileScan:
     has_main_guard: bool
     pip_hints: tuple[str, ...] = ()
     cell_lines: tuple[tuple[int, int], ...] = ()  # ноутбук: строка склеенного кода → (ячейка, строка в ней)
+    code_chars: int = 0  # ноутбук: сколько символов кода списано с лимита проекта
 
     def where(self, line: int) -> str:
         """Место для отчёта: «a.py:12», у ноутбука — «exp.ipynb, ячейка 3, стр. 2»."""
@@ -183,6 +192,11 @@ def _children(node: ast.AST, context: Context) -> list[tuple[ast.AST, Context]]:
     return [(child, context) for child in ast.iter_child_nodes(node)]
 
 
+def _is_module_name(name: str) -> bool:
+    """«pkg.sub» или относительное «.sub»: каждая часть — идентификатор. «my module» и «a\\nb» — не имена модулей."""
+    return all(part.isidentifier() for part in name.lstrip(".").split("."))
+
+
 class _Visitor:
     """Собирает импорты, находки и пути к данным.
 
@@ -260,7 +274,7 @@ class _Visitor:
 
     def _dynamic_import(self, node: ast.Call) -> None:
         arg = node.args[0] if node.args else _keyword(node, "name")
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and _is_module_name(arg.value):
             self.imports.append(ImportRef(arg.value, node.lineno, "dynamic"))
             self.findings.append(Finding("dynamic_import", node.lineno, arg.value))
         else:
@@ -269,17 +283,20 @@ class _Visitor:
 
     def _exec(self, node: ast.Call, name: str) -> None:
         """Строка-литерал в exec/eval разбирается (не выполняется) ради импортов; строка, собранная
-        при запуске, статически не видна — об этом честное предупреждение."""
+        при запуске или не разбирающаяся как Python, статически не видна — об этом честное предупреждение."""
         arg = node.args[0] if node.args else None
         if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
             if name == "exec" and arg is not None:
                 self.findings.append(Finding("exec_unresolved", node.lineno, _source(arg)))
             return
-        inner = _Visitor()
         try:
-            inner.run(ast.parse(arg.value))
+            tree, skipped = parse_code("<exec>", arg.value)
         except (*SYNTAX_ERRORS, *COMPLEXITY_ERRORS):
+            self.findings.append(Finding("exec_syntax_error", node.lineno, _source(arg)))
             return
+        inner = _Visitor()
+        inner.run(tree)
+        self.findings.extend(Finding(f.code, node.lineno, f.detail) for f in skipped)
         for ref in inner.imports:
             if not ref.level:
                 self.imports.append(ImportRef(ref.module, node.lineno, "dynamic"))
@@ -299,7 +316,7 @@ class _Visitor:
 
     def visit_Constant(self, node: ast.Constant, context: Context) -> list:
         value = node.value
-        if isinstance(value, str) and "\n" not in value and 2 < len(value) < 260:
+        if isinstance(value, str) and "\n" not in value and 2 < len(value) < MAX_DATA_REF_CHARS:
             if ABSOLUTE_PATH.match(value):
                 self.findings.append(Finding("absolute_path", node.lineno, value))
             elif _is_data_name(value):
@@ -349,8 +366,10 @@ def _blank_long_statements(text: str) -> tuple[str, list[int]]:
     return "".join(lines), blanked
 
 
-def _parse(path: str, text: str) -> tuple[ast.AST, list[Finding]]:
-    if any(len(line) > MAX_LINE_CHARS for line in text.splitlines()):  # длинные выражения до разбора, а не после
+def parse_code(path: str, text: str) -> tuple[ast.AST, list[Finding]]:
+    """Единственный путь к ast.parse для кода из загрузки: файлы, ячейки ноутбуков, строки exec, setup.py."""
+    joined = CONTINUATION.sub("", text) if "\\" in text else text
+    if any(len(line) > MAX_LINE_CHARS for line in joined.splitlines()):  # длинные выражения до разбора, а не после
         reduced, blanked = _blank_long_statements(text)
         if blanked:
             return ast.parse(reduced, filename=path), [Finding("long_statement", line, "") for line in blanked]
@@ -369,7 +388,7 @@ def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
         return replace(skipped_scan(path, f"{len(text) / 1_000_000:.1f} МБ кода"), pip_hints=pip_hints,
                        cell_lines=cell_lines)
     try:
-        tree, skipped = _parse(path, text)
+        tree, skipped = parse_code(path, text)
     except COMPLEXITY_ERRORS:
         finding = Finding("too_complex", 0, "очень глубокая вложенность выражений")
         return _unreadable(path, finding, pip_hints, cell_lines)
@@ -398,7 +417,7 @@ def scan_source(path: str, text: str, pip_hints: tuple[str, ...] = (),
 
 def _parses(code: str) -> bool:
     try:
-        ast.parse(code)
+        parse_code("<cell>", code)
     except (*SYNTAX_ERRORS, *COMPLEXITY_ERRORS):
         return False
     return True
@@ -465,25 +484,30 @@ def _cell_code(source: str) -> tuple[list[str], list[str]] | None:
     return lines, hints
 
 
-def scan_notebook(path: str, text: str) -> FileScan:
+def scan_notebook(path: str, text: str, budget: int = MAX_TOTAL_CODE_CHARS) -> FileScan:
     """Код-ячейки .ipynb разбираются по отдельности: ячейка с синтаксисом IPython не прячет импорты
-    остальных, а места в отчёте указывают номер ячейки и строку в ней."""
+    остальных, а места в отчёте указывают номер ячейки и строку в ней.
+
+    budget — сколько кода ещё можно разобрать в проекте: код ноутбука списывается с него, как код .py."""
+    if len(text) > MAX_NOTEBOOK_CHARS:  # до json.loads: он занимает в 20+ раз больше памяти, чем файл
+        return skipped_scan(path, f"ноутбук {len(text) / 1_000_000:.1f} МБ вместе с выводами ячеек — больше "
+                                  f"{MAX_NOTEBOOK_CHARS // 1_000_000} МБ; очистите выводы и загрузите снова")
     cells = _notebook_cells(text)
     if cells is None:
         return _unreadable(path, Finding("syntax_error", 0, "некорректный JSON ноутбука"))
-    code, cell_lines, hints, findings = [], [], [], []
-    for number, source in cells:
-        parsed = _cell_code(source)
-        if parsed is None:
-            continue
-        lines, cell_hints = parsed
-        hints += cell_hints
+    python_cells = [(number, parsed) for number, source in cells if (parsed := _cell_code(source)) is not None]
+    hints = tuple(hint for _, (_, cell_hints) in python_cells for hint in cell_hints)
+    magic = (Finding("notebook_magic", 0, " ".join(hints)),) if hints else ()
+    size = sum(len(row) for _, (lines, _) in python_cells for row in lines)
+    if size > min(budget, MAX_CODE_CHARS):  # до разбора ячеек: ast на каждой стоит столько же памяти, сколько на файле
+        skipped = skipped_scan(path, f"{size / 1_000_000:.1f} МБ кода" if size > MAX_CODE_CHARS else OVER_BUDGET)
+        return replace(skipped, findings=skipped.findings + magic, pip_hints=hints, code_chars=size)
+    code, cell_lines, findings = [], [], []
+    for number, (lines, _) in python_cells:
         if not _parses("".join(lines)):
             findings.append(Finding("cell_syntax_error", 0, f"ячейка {number}"))
             continue
         code += lines
         cell_lines += [(number, row) for row in range(1, len(lines) + 1)]
-    scan = scan_source(path, "".join(code), tuple(hints), tuple(cell_lines))
-    if hints:
-        findings.append(Finding("notebook_magic", 0, " ".join(hints)))
-    return replace(scan, findings=scan.findings + tuple(findings))
+    scan = scan_source(path, "".join(code), hints, tuple(cell_lines))
+    return replace(scan, findings=scan.findings + tuple(findings) + magic, code_chars=size)

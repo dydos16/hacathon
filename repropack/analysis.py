@@ -4,12 +4,14 @@ import platform
 import posixpath
 import re
 from dataclasses import dataclass
+from functools import cache
 from pathlib import PurePosixPath
 
 from .classify import (NOT_ON_PYPI, PACKAGED_CATEGORIES, PYTHON2, REMOVED_STDLIB, STDLIB_ADDED, Dependency, classify,
-                       parse_declared_checked)
+                       module_exists, parse_declared_checked)
 from .markdown import escape
-from .scanner import DATA_EXTENSIONS, NO_REQUIREMENT, FileScan, scan_notebook, scan_source, skipped_scan
+from .scanner import (DATA_EXTENSIONS, MAX_DATA_REF_CHARS, MAX_TOTAL_CODE_CHARS, NO_REQUIREMENT, OVER_BUDGET, FileScan,
+                      scan_notebook, scan_source, skipped_scan)
 from .secrets import SecretHit, env_names, find_secrets, is_secret_file, read_text, redact
 
 DEFAULT_PYTHON = (3, 11)
@@ -17,12 +19,14 @@ ENTRY_NAMES = ("main.py", "run.py", "app.py", "analysis.py", "experiment.py", "t
 LEVEL_ORDER = {"high": 0, "medium": 1, "info": 2}
 UNRESOLVABLE_DATA = "*{}<>|%"  # шаблоны имён (glob, %-формат): конкретный файл по ним не найти
 PYTHON_CLAUSE = re.compile(r"(\^|~=|~|===|==|!=|<=|>=|<|>)?\s*(\d+)(?:\.(\d+))?(?:\.[\d*]+)*")
-MAX_TOTAL_CODE_CHARS = 10_000_000  # весь проект: крошечный ZIP с мегабайтами кода не должен занимать сервер минутами
 # Управляющие символы и смена направления текста из загрузки (имя модуля, путь) не попадают в отчёт, README и
 # терминал: перевод строки дописал бы в REPORT.md свой заголовок, а ESC-последовательность — сменила бы заголовок окна
 UNSAFE_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 CONDA_ONLY_SHOWN = 8
 PLACES_SHOWN = 3
+# Глубже в пакете модули не лежат; «хвосты» пути длиннее не сверяются с импортами — иначе путь из тысяч папок
+# даёт квадрат от их числа
+MAX_MODULE_DEPTH = 32
 AUXILIARY_PATH = re.compile(r"(^|/)((setup|conftest|noxfile)\.py|test_[^/]*|[^/]*_test\.py)$"
                             r"|(^|/)(tests?|docs?|migrations)/")
 
@@ -62,15 +66,17 @@ def decode(data: bytes) -> str:
 
 
 def _scan_all(files: dict[str, bytes]) -> list[FileScan]:
+    """Код .py и ноутбуков списывается с одного лимита на проект; файл сверх лимита не разбирается."""
     scans, budget = [], MAX_TOTAL_CODE_CHARS
     for path, data in sorted(files.items()):
         if path.endswith(".py"):
             text = decode(data)
             budget -= len(text)
-            scans.append(scan_source(path, text) if budget >= 0 else
-                         skipped_scan(path, f"исчерпан лимит {MAX_TOTAL_CODE_CHARS // 1_000_000} МБ кода на проект"))
+            scans.append(scan_source(path, text) if budget >= 0 else skipped_scan(path, OVER_BUDGET))
         elif path.endswith(".ipynb"):
-            scans.append(scan_notebook(path, decode(data)))
+            scan = scan_notebook(path, decode(data), max(budget, 0))
+            budget -= scan.code_chars
+            scans.append(scan)
     return scans
 
 
@@ -90,9 +96,11 @@ def _imported_modules(scans: list[FileScan]) -> set[str]:
 
 
 def _is_imported(path: str, imported: set[str]) -> bool:
-    """Файл, который импортируют другие файлы проекта, — библиотека, а не скрипт («model.py» для «train.py»)."""
-    dotted = "." + PurePosixPath(path).with_suffix("").as_posix().replace("/", ".")
-    return any(dotted.endswith(f".{module}") for module in imported)
+    """Файл, который импортируют другие файлы проекта, — библиотека, а не скрипт («model.py» для «train.py»).
+
+    Сверяются «хвосты» пути самого файла («pkg.model», «model»), а не каждый импорт проекта с каждым файлом."""
+    parts = PurePosixPath(path).with_suffix("").as_posix().replace("/", ".").split(".")
+    return any(".".join(parts[-n:]) in imported for n in range(1, min(len(parts), MAX_MODULE_DEPTH) + 1))
 
 
 def _entry_candidates(scans: list[FileScan]) -> tuple[str, ...]:
@@ -170,7 +178,19 @@ def _suggest_python(scans: list[FileScan], deps: list[Dependency], hint: str) ->
     return _version(chosen), reason, issues
 
 
-def _resolve_data(ref: str, importer: str, files: dict[str, bytes]) -> str | None:
+def _tail_index(files: dict[str, bytes]) -> dict[str, str]:
+    """«Хвост» пути («/data/x.csv», «/x.csv») → первый по алфавиту файл с ним; строится один раз на анализ.
+
+    Хвосты длиннее ссылки на данные не нужны: такую ссылку сканер не запоминает."""
+    index = {}
+    for path in sorted(files, reverse=True):  # меньший путь записывается последним и остаётся в индексе
+        full, cut = f"/{path}", len(path) + 1
+        while (cut := full.rfind("/", 0, cut)) >= 0 and len(full) - cut <= MAX_DATA_REF_CHARS:
+            index[full[cut:]] = path
+    return index
+
+
+def _resolve_data(ref: str, importer: str, files: dict[str, bytes], tails: dict[str, str]) -> str | None:
     """Путь от папки скрипта или от корня проекта; иначе — файл с тем же «хвостом» пути в любой папке.
 
     Так находятся пути, собранные через os.path.join(DATA_DIR, "x.csv") или Path(...) / "x.csv".
@@ -180,17 +200,16 @@ def _resolve_data(ref: str, importer: str, files: dict[str, bytes]) -> str | Non
         candidate = posixpath.normpath(posixpath.join(base, ref))
         if candidate in files:
             return candidate
-    tail = "/" + "/".join(part for part in PurePosixPath(ref).parts if part not in ("..", ".", "/"))
-    return next((path for path in sorted(files) if f"/{path}".endswith(tail)), None)
+    return tails.get("/" + "/".join(part for part in PurePosixPath(ref).parts if part not in ("..", ".", "/")))
 
 
 def _data_refs(scans: list[FileScan], files: dict[str, bytes]) -> tuple[list[str], list[tuple[str, str]]]:
-    found, missing = set(), {}
+    found, missing, tails = set(), {}, _tail_index(files)
     for scan in scans:
         for ref, line in scan.data_refs:
             if any(ch in ref for ch in UNRESOLVABLE_DATA):
                 continue
-            resolved = _resolve_data(ref, scan.path, files)
+            resolved = _resolve_data(ref, scan.path, files, tails)
             if resolved:
                 found.add(resolved)
             else:
@@ -199,7 +218,7 @@ def _data_refs(scans: list[FileScan], files: dict[str, bytes]) -> tuple[list[str
 
 
 def _relative_import_issues(scans: list[FileScan], files: dict[str, bytes]) -> list[Issue]:
-    issues = []
+    issues, paths = [], sorted(files)
     for scan in scans:
         for ref in scan.imports:
             if ref.kind != "relative" or not ref.module:
@@ -208,7 +227,7 @@ def _relative_import_issues(scans: list[FileScan], files: dict[str, bytes]) -> l
             for _ in range(ref.level - 1):
                 base = base.parent
             target = str(PurePosixPath(base, *ref.module.split(".")))
-            if f"{target}.py" not in files and not any(p.startswith(f"{target}/") for p in files):
+            if not module_exists(target, files, paths):
                 issues.append(Issue("high", f"Относительный импорт «{'.' * ref.level}{ref.module}» не найден",
                                     "модуля нет в загруженных файлах — добавьте его в архив", scan.where(ref.line)))
     return issues
@@ -218,8 +237,8 @@ FINDING_ISSUES = {
     "syntax_error": ("high", "Файл не разбирается как Python 3",
                      "{detail}. Возможно, это код Python 2 или опечатка — импорты из файла не учтены"),
     "too_large": ("high", "Файл слишком большой для разбора",
-                  "{detail}: разбираются файлы до 1 МБ кода и до 10 МБ на проект — импорты из файла не учтены, "
-                  "проверьте их вручную"),
+                  "{detail}: разбираются файлы до 1 МБ кода (ноутбуки — до 10 МБ вместе с выводами) и до 10 МБ кода "
+                  "на проект — импорты из файла не учтены, проверьте их вручную"),
     "too_complex": ("high", "Файл слишком сложный для разбора",
                     "{detail} — импорты из файла не учтены, проверьте их вручную"),
     "long_statement": ("info", "Очень длинное выражение пропущено при разборе",
@@ -250,6 +269,9 @@ FINDING_ISSUES = {
                  "проверьте эти модули в таблице зависимостей"),
     "exec_import": ("medium", "Импорт «{detail}» внутри exec/eval",
                     "модуль загружается из строки кода — учтён в зависимостях, но проверьте"),
+    "exec_syntax_error": ("medium", "Строка в exec/eval не разбирается как Python",
+                          "«{detail}» — синтаксическая ошибка (например, код Python 2) или слишком сложное выражение: "
+                          "импорты внутри строки не учтены, а при запуске exec/eval может упасть. Проверьте её вручную"),
     "exec_unresolved": ("info", "Код выполняется через exec",
                         "строка «{detail}» собирается при запуске — импорты внутри неё статически не видны; "
                         "если они там есть, добавьте зависимости вручную"),
@@ -391,8 +413,10 @@ def analyze(files: dict[str, bytes], use_local_env: bool = False) -> Analysis:
         issues.append(Issue("info", "Несколько точек входа", "выберите, какой файл запускать"))
     issues += [Issue("info", f"Нет: {name}", "не обязательно, но помогает повторить эксперимент")
                for name, present in hygiene if not present]
-    # Детали проблем берут куски кода (аргумент exec, имя модуля…): секрет в них не должен уйти в отчёт и интерфейс
-    issues = [Issue(i.level, clean(i.title), clean(i.detail), i.where) for i in issues]
+    # Детали проблем берут куски кода (аргумент exec, имя модуля…): секрет в них не должен уйти в отчёт и интерфейс.
+    # Одинаковые тексты (у тысяч модулей одна подсказка) чистятся один раз
+    cleaned = cache(clean)
+    issues = [Issue(i.level, cleaned(i.title), cleaned(i.detail), i.where) for i in issues]
 
     return Analysis(
         files=files, scans=tuple(scans), dependencies=tuple(deps),
