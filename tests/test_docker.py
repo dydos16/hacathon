@@ -54,3 +54,10 @@ def test_opencv_gets_the_system_libraries_it_needs_in_slim_image(tmp_path: Path)
     dockerfile, output = build_and_run({"main.py": b"import cv2\n\nprint('opencv', cv2.__version__)\n"}, tmp_path)
     assert "apt-get install" in dockerfile and "libgl1" in dockerfile
     assert output.startswith("opencv ")
+
+
+def test_project_runs_as_unprivileged_user_that_can_write_results(tmp_path: Path):
+    """Код коллеги в контейнере работает не от root (uid ≠ 0), но пишет результаты в свою папку /app."""
+    script = b"import os\n\nopen('result.txt', 'w').write('ok')\nprint('uid', os.getuid())\n"
+    _, output = build_and_run({"main.py": script}, tmp_path)
+    assert output.startswith("uid ") and output.split()[1] != "0", output

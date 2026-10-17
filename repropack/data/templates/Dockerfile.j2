@@ -7,5 +7,8 @@ WORKDIR /app
  && rm -rf /var/lib/apt/lists/*
 {% endif %}COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY project/ .
+# Проект запускается не от root: пакеты уже поставлены, а в /app код может писать свои результаты
+RUN useradd --create-home repro && chown repro /app
+COPY --chown=repro:repro project/ .
+USER repro
 CMD {{ cmd_json }}

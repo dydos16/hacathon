@@ -1,6 +1,7 @@
 import io
 import json
 import platform
+import re
 import runpy
 import subprocess
 import sys
@@ -13,10 +14,14 @@ from repropack import packer
 from repropack.__main__ import main
 from repropack.analysis import analyze
 from repropack.intake import read_directory
+from repropack.markdown import escape
 from repropack.packer import (TREE_LIMIT, PackOptions, Requirement, build_zip, default_requirements, package_tree,
-                              render_package, requirements_text)
+                              render_package, requirements_text, slugify)
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
+CI_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "ci.yml"
+# Имя образа для «docker build -t»: строчные латинские буквы и цифры через «-»
+DOCKER_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 FAKE_KEY = "sk-DEMO0000000000000000000000000000fake"
 
 
@@ -279,3 +284,60 @@ def test_values_must_match_entirely_without_newlines_or_unicode_digits(python, p
     analysis = analyze({"main.py": b"import numpy\n"})
     with pytest.raises(ValueError):
         render_package(analysis, PackOptions("p", "main.py", python, (Requirement(package, version),)))
+
+
+def test_docker_image_runs_project_as_unprivileged_user():
+    """Проект коллеги в контейнере работает не от root: apt-get и pip — от root, затем USER перед CMD."""
+    analysis = analyze({"main.py": b"import cv2\n"})
+    options = PackOptions("p", "main.py", "3.11", default_requirements(analysis))
+    dockerfile = render_package(analysis, options)["Dockerfile"]
+    lines = dockerfile.splitlines()
+    user = lines.index("USER repro")
+    assert "useradd" in dockerfile and "chown repro /app" in dockerfile  # /app — его: код может писать результаты
+    assert "COPY --chown=repro:repro project/ ." in lines
+    assert lines.index("RUN pip install --no-cache-dir -r requirements.txt") < user
+    assert next(i for i, line in enumerate(lines) if "apt-get install" in line) < user
+    assert lines[-1].startswith("CMD ") and user < len(lines) - 1
+
+
+def test_ci_actions_are_pinned_to_commit_sha_and_uv_to_exact_version():
+    """Тег действия (actions/checkout@v4) можно перевесить на другой код, а полный SHA коммита — нельзя.
+
+    uv ставится точной версией, токен — только на чтение и не остаётся в .git/config."""
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    uses = re.findall(r"uses:\s*(\S+)", workflow)
+    assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", action) for action in uses), uses
+    assert re.search(r"pip install uv==[0-9]+\.[0-9]+\.[0-9]+\n", workflow)
+    assert "\npermissions:\n  contents: read\n" in workflow
+    assert workflow.count("persist-credentials: false") == workflow.count("actions/checkout@")
+
+
+def test_slug_is_unique_for_non_ascii_and_long_names_and_valid_as_docker_image_name():
+    """Кириллица и пустое имя не сливаются в «project», длинное имя не даёт папку длиннее 255 байт и тег длиннее 128."""
+    names = ["эксперимент", "опыт", "", "Опыт v2", "опыт v2", "x" * 300, "x" * 301, "é" * 300]
+    slugs = [slugify(name) for name in names]
+    assert len(set(slugs)) == len(names), slugs
+    assert all(DOCKER_NAME.fullmatch(slug) and len(slug) <= 64 for slug in slugs), slugs
+    assert slugify("numpy_pandas_script") == "numpy-pandas-script" and slugify("My Lab!") == "my-lab"
+    assert slugify("эксперимент") == slugify("эксперимент")  # имя архива не меняется от сборки к сборке
+
+
+def test_comment_ending_with_backslash_does_not_swallow_next_requirement():
+    """pip склеивает строку, оканчивающуюся на «\\», со следующей: комментарий «C:\\data\\» съел бы pandas."""
+    text = requirements_text((Requirement("numpy", "1.26", comment="данные в C:\\data\\ \\"),
+                              Requirement("pandas", ">=2.0")), "now")
+    assert not any(line.rstrip().endswith("\\") for line in text.splitlines()), text
+    assert "C:\\data" in text and "\npandas>=2.0" in text
+
+
+def test_user_text_cannot_become_markdown_in_readme_and_report():
+    """Имя проекта, пути и имена модулей — текст: не ссылка, не картинка, не лишняя ячейка таблицы."""
+    name = "Lab](http://evil.example) ![x](http://img.example/p.png) | `code`"
+    files = {"main.py": b"import importlib\nimportlib.import_module('evil|mod')\n",
+             "w|e`ird.py": b"import numpy\n"}
+    rendered = render_package(analyze(files), PackOptions(name, "main.py", "3.11", ()), "now")
+    for doc in ("README.md", "REPORT.md"):
+        assert escape(name) in rendered[doc].splitlines()[0], rendered[doc].splitlines()[0]
+    rows = [line for line in rendered["REPORT.md"].splitlines() if line.startswith("|")][2:]
+    assert any("evil" in row for row in rows) and any("ird.py" in row for row in rows)
+    assert all(len(re.findall(r"(?<!\\)\|", row)) == 7 for row in rows), rows

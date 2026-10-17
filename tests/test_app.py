@@ -194,7 +194,7 @@ def test_archive_name_is_shown_and_cyrillic_project_name_is_explained():
     assert "Имя архива: `numpy-pandas-script-repro.zip`" in texts(open_demo("numpy_pandas_script").caption)
     app = upload(("эксперимент.py", b"print(1)\n"))
     assert app.text_input[1].value == "эксперимент"
-    assert "Имя архива: `project-repro.zip` — нелатинские буквы в имя файла не попадают" in texts(app.caption)
+    assert "Имя архива: `project-b80af157-repro.zip` — нелатинские буквы в имя файла не попадают" in texts(app.caption)
 
 
 def test_requirements_and_report_can_be_downloaded_separately():
