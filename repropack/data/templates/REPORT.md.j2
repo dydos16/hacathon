@@ -1,4 +1,4 @@
-# Отчёт о неопределённостях — {{ project_name }}
+# Отчёт о неопределённостях — {{ project_name|md }}
 
 Создан repro-packer {{ created }}. Разбор статический: код проекта **не запускался**.
 
@@ -8,16 +8,16 @@
 
 | Модуль | Категория | Пакет PyPI | Версия | Откуда имя | Где используется |
 |---|---|---|---|---|---|
-{% for d in dependencies %}| `{{ d.module }}` | {{ categories[d.category] }} | {{ d.package or "—" }} | {{ (d.version or "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %}, **подтвердить вручную**{% endif %} | {{ d.locations[:3]|map("mdcode")|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
+{% for d in dependencies %}| {{ d.module|mdcell }} | {{ categories[d.category] }} | {{ d.package|mdcell if d.package else "—" }} | {{ (d.version|mdcell if d.version else "неизвестна") if d.package else "—" }}{% if d.version_source %} ({{ d.version_source|md }}){% endif %} | {{ d.status or "—" }}{% if d.needs_confirmation %}, **подтвердить вручную**{% endif %} | {{ d.locations[:3]|map("mdcell")|join(", ") }}{% if d.locations|length > 3 %} и ещё {{ d.locations|length - 3 }}{% endif %} |
 {% endfor %}
 {% if environment %}## Версии установленной среды
 
 Прочитаны с разрешения пользователя там, где запускался repro-packer ({% for name, value in environment %}{{ name }} {{ value }}{{ ", " if not loop.last }}{% endfor %}). Это среда автора пакета, а не коллеги: точные версии у коллеги зафиксирует `verify.sh`.
 
-{% for d in local_versions %}- `{{ d.package }}{{ d.version }}`
+{% for d in local_versions %}- {{ (d.package ~ d.version)|mdcode }}
 {% else %}- Ни один пакет проекта в этой среде не найден.
 {% endfor %}{% if not_installed %}
-Версия осталась неизвестной (пакета нет ни в файлах автора, ни в этой среде): {{ not_installed|join(", ") }}.
+Версия осталась неизвестной (пакета нет ни в файлах автора, ни в этой среде): {{ not_installed|map("mdcode")|join(", ") }}.
 {% endif %}
 {% endif %}## Предупреждения
 

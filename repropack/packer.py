@@ -24,6 +24,8 @@ TEMPLATES = Environment(loader=FileSystemLoader(Path(__file__).parent / "data" /
 # Пользовательские строки в Markdown: имя проекта и файлы — экранируются, код в обратных кавычках — оборачивается
 TEMPLATES.filters["md"] = escape
 TEMPLATES.filters["mdcode"] = code
+# Ячейка таблицы: «|» делит ячейки даже внутри кода в обратных кавычках, поэтому экранируется и там
+TEMPLATES.filters["mdcell"] = lambda text: code(text).replace("|", "\\|")
 CATEGORIES = {"stdlib": "стандартная библиотека", "removed": "удалён из Python", "local": "локальный модуль",
               "external": "внешний пакет", "implicit": "неявная зависимость", "declared_only": "объявлен автором",
               "conda_only": "пакет conda (не для pip)"}
